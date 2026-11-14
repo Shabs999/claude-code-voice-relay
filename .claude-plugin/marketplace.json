@@ -1,5 +1,5 @@
 {
-  "name": "softcery",
+  "name": "handsfree",
   "owner": {
     "name": "Softcery"
   },
@@ -10,5 +10,5 @@
       "description": "Talk to Claude Code by voice."
     }
   ],
-  "description": "Claude Code plugins by Softcery."
+  "description": "Fish Not Hunt fork of softcery/claude-code-voice-relay: configurable allowed hosts (VOICE_RELAY_HOSTS) and max_completion_tokens for OpenAI."
 }

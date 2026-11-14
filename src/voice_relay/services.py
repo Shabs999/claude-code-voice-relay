@@ -105,7 +105,7 @@ def llm(service: Service, *, prompt: str, max_tokens: int = MAX_TOKENS) -> LLMSe
     common: dict[str, Any] = {
         "model": model,
         "system_instruction": prompt,
-        "max_tokens": max_tokens,
+        "max_completion_tokens" if service.provider == "openai" else "max_tokens": max_tokens,
     }
     match service.provider:
         case "anthropic":

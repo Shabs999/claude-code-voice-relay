@@ -177,7 +177,10 @@ The settings page lists the voices of the provider with samples and the OpenRout
 | Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `1.2` | `1.0` |
 | Progress interval | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
 | Projects folder | `VOICE_RELAY_PROJECTS` | a folder with your projects | none |
+| Extra allowed hosts | `VOICE_RELAY_HOSTS` | comma-separated `host[:port]`, e.g. `ubuntu-4gb-hel1-2.tail90c2a0.ts.net:7860` | empty |
 | Terminal | `VOICE_RELAY_TERMINAL` | a terminal command, macOS and Linux | the system terminal |
+
+`VOICE_RELAY_HOSTS` allows extra Host values and their HTTP/HTTPS Origins for a trusted reverse proxy such as `tailscale serve`. Whitespace around entries is ignored. The server still binds to `127.0.0.1`; restart it after changing this setting.
 
 Keys: `ASSEMBLYAI_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GROQ_API_KEY`, `ELEVENLABS_API_KEY`. Shell environment variables work too.
 

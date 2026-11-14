@@ -23,13 +23,20 @@ REOPEN_SECONDS = 60.0
 
 
 class LocalOnly:
-    """Refuses a request whose Host or Origin is not this server: a website in the browser
-    cannot reach the voice bot or a route, and DNS rebinding fails."""
+    """Allows local Host and Origin values, plus extra hosts when configured.
+    Other websites and DNS rebinding requests cannot reach the voice bot or a route."""
 
     def __init__(self, app: ASGIApp, port: int) -> None:
         self.app = app
         self.hosts = {f"{settings.HOST}:{port}".encode(), f"localhost:{port}".encode()}
         self.origins = {b"http://" + host for host in self.hosts}
+        extra = {
+            host.strip().lower().encode()
+            for host in settings.environment().get("VOICE_RELAY_HOSTS", "").split(",")
+            if host.strip()
+        }
+        self.hosts |= extra
+        self.origins |= {scheme + host for host in extra for scheme in (b"http://", b"https://")}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] in ("http", "websocket"):
