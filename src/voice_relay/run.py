@@ -4,6 +4,7 @@ the mod, the tray and the settings page."""
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 from loguru import logger
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -27,11 +28,18 @@ POLL_SECONDS = 25.0  # under the 30 s limit of a mod's HTTP call
 
 BRIDGE = Bridge(interval=30.0)
 MICROPHONE = Microphone()
+PREFS = routes.Prefs()
 
 
 async def bot(runner_args: RunnerArguments) -> None:
     """Runs one voice session with the settings saved now. The runner calls it per client."""
     current = settings.load()
+    if current.tts.provider == "openai":
+        current = replace(current, speed=PREFS.speed if PREFS.speed is not None else current.speed,
+                          tts=replace(current.tts, voice=PREFS.voice or current.tts.voice))
+    else:
+        current = replace(current, speed=min(current.speed, 1.2))
+    BRIDGE.tts_provider = current.tts.provider
     BRIDGE.interval = current.narration_seconds
     params = {"webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True)}
     transport = await create_transport(runner_args, params)
@@ -68,6 +76,7 @@ async def bot(runner_args: RunnerArguments) -> None:
     async def _on_client_ready(rtvi: object) -> None:
         greeting = {"role": DEVELOPER, "content": f"{current.greeting}\n{BRIDGE.linked_line()}"}
         await worker.queue_frame(LLMMessagesAppendFrame(messages=[greeting], run_llm=True))
+        await BRIDGE.replay()
 
     @transport.event_handler("on_client_disconnected")
     async def _on_client_disconnected(transport: object, client: object) -> None:
@@ -85,7 +94,7 @@ def serve() -> None:
     names them."""
     port, token = settings.port(), settings.token()
     routes.mount(
-        app, bridge=BRIDGE, microphone=MICROPHONE, token=token, port=port, poll=POLL_SECONDS
+        app, bridge=BRIDGE, microphone=MICROPHONE, token=token, port=port, poll=POLL_SECONDS, prefs=PREFS
     )
     web.mount(app, token=token)
     desktop.lifespan(app, port=port, active=BRIDGE.active)

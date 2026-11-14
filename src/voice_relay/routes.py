@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -20,6 +21,15 @@ from .sessions import Session
 SESSION_HEADER = "x-claude-session"
 PAGES = {"client": "/voice", "settings": "/settings"}
 REOPEN_SECONDS = 60.0
+
+
+VOICES = ("alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse")
+
+
+@dataclass
+class Prefs:
+    speed: float | None = None
+    voice: str | None = None
 
 
 class LocalOnly:
@@ -54,9 +64,11 @@ class LocalOnly:
 
 
 def mount(
-    app: FastAPI, *, bridge: Bridge, microphone: Microphone, token: str, port: int, poll: float
+    app: FastAPI, *, bridge: Bridge, microphone: Microphone, token: str, port: int, poll: float,
+    prefs: Prefs | None = None
 ) -> None:
     """Adds the guard, the mod routes under /claude and the tray routes under /desktop."""
+    prefs = prefs if prefs is not None else Prefs()
     app.add_middleware(LocalOnly, port=port)
     shown = [-REOPEN_SECONDS]  # when the voice window last opened for a mod
 
@@ -126,6 +138,7 @@ def mount(
             {
                 "voice": bridge.voice(),
                 "muted": microphone.muted,
+                "prefs": {"speed": prefs.speed, "voice": prefs.voice},
                 "sessions": bridge.state(),
                 "problems": len(settings.problems()),
                 "config": settings.version(),
@@ -156,6 +169,19 @@ def mount(
         if not isinstance(muted, bool):
             raise HTTPException(400, "muted: expected true or false")
         microphone.muted = muted
+        return Response(status_code=204)
+
+    @app.post("/desktop/prefs")
+    async def preferences(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        speed, voice = body.get("speed"), body.get("voice")
+        if type(speed) not in (int, float) or not 1.0 <= speed <= 2.0:
+            raise HTTPException(400, "speed: expected a number from 1.0 to 2.0")
+        if voice not in VOICES:
+            raise HTTPException(400, "voice: expected an OpenAI voice")
+        prefs.speed, prefs.voice = float(speed), voice
+        await bridge.update_prefs(prefs.speed, voice)
         return Response(status_code=204)
 
     @app.post("/desktop/quit")

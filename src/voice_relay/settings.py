@@ -138,7 +138,7 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         prompt=prompt(),
         greeting=(PROMPTS / "greeting.md").read_text(encoding=ENCODING),
         narration_seconds=_number(env, "VOICE_RELAY_NARRATION_SECONDS", 30.0, 10.0, 300.0),
-        speed=_number(env, "VOICE_RELAY_TTS_SPEED", 1.0, 0.7, 1.2),  # the range of each provider
+        speed=_number(env, "VOICE_RELAY_TTS_SPEED", 1.0, 0.7, 2.0),  # OpenAI accepts up to 4.0; 2.0 is our ceiling
     )
 
 
@@ -288,6 +288,8 @@ def _number[N: (int, float)](env: Mapping[str, str], name: str, default: N, low:
         raise SettingsError(
             f"{name}: expected a {type(default).__name__}, got a text of {len(value)} characters"
         ) from None
+    if name == "VOICE_RELAY_TTS_SPEED" and number == number:
+        return max(low, min(high, number))
     if not low <= number <= high:
         raise SettingsError(f"{name}: expected a number from {low} to {high}, got one outside")
     return number

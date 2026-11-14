@@ -78,6 +78,8 @@ a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
 @keyframes breathe { 50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--listening) 18%, transparent); } }
 @keyframes pulse { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); } to { box-shadow: 0 0 0 22px transparent; } }
 @media (prefers-reduced-motion: reduce) { .mic { animation: none !important; } }
+.prefs { display: flex; gap: 12px; }
+.prefs .chip { min-width: 64px; min-height: 44px; font-size: var(--wa-font-size-m); }
 .status { font-weight: var(--wa-font-weight-semibold); }
 .hint { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-s); min-height: 1.4em; text-align: center; }
 
@@ -146,6 +148,7 @@ li.waiting { outline: 1px solid var(--waiting); }
       </button>
       <div class="status" id="status" role="status">Connecting</div>
       <div class="hint" id="hint"></div>
+      <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
       <wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Turn on sound</wa-button>
     </div>
     <div>
@@ -182,6 +185,21 @@ const KEPT_LINES = 80;
 const $ = id => document.getElementById(id);
 const audio = new Audio();
 let state = null, picks = {}, typed = {}, client = null, connected = false, muted = false, speaking = false, lastAgent = null;
+let wanted = false, retryTimer = null, retryStep = 0;
+const speeds = [1, 1.25, 1.5, 1.75, 2];
+const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
+let speed = 1.5, voice = "ash";
+try {
+  const savedSpeed = Number(localStorage.getItem("voice-relay.speed"));
+  const savedVoice = localStorage.getItem("voice-relay.voice");
+  if (speeds.includes(savedSpeed)) speed = savedSpeed;
+  if (voices.includes(savedVoice)) voice = savedVoice;
+} catch { /* storage can be disabled */ }
+function renderPrefs() {
+  $("speed").textContent = `${speed.toFixed(2).replace(/0$/, "")}×`;
+  $("voice").textContent = voice;
+}
+renderPrefs();
 let config;  // the settings version of the running connection
 
 function el(tag, props = {}, ...children) {
@@ -483,16 +501,35 @@ async function showSetup() {
 function start() {
   $("setup").classList.add("hidden");
   $("talk").classList.remove("hidden");
-  if (client) location.reload();  // the new settings apply on connect, and a client connects once
+  if (client) restart();
   else connect();
 }
 
 /* Talk: the connection, the mic button, the sessions and the conversation. */
 
+function retry() {
+  if (!wanted || retryTimer !== null) return;
+  show("reconnecting");
+  const delay = [1, 2, 4, 8, 16, 30][Math.min(retryStep++, 5)];
+  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay * 1000);
+}
+function wake() {
+  if (!wanted || client) return;
+  clearTimeout(retryTimer); retryTimer = null; retryStep = 0;
+  connect();
+}
+async function restart() {
+  const previous = client;
+  client = null; connected = false;
+  await previous?.disconnect().catch(() => {});
+  wake();
+}
 async function connect() {
+  wanted = true;
   if (client) return;
-  show("connecting");
-  client = new PipecatClient({
+  clearTimeout(retryTimer); retryTimer = null;
+  show(retryStep ? "reconnecting" : "connecting");
+  const attempt = new PipecatClient({
     transport: new SmallWebRTCTransport(),
     enableMic: true,
     enableCam: false,
@@ -508,22 +545,33 @@ async function connect() {
       },
       onBotStartedSpeaking() { speaking = true; show(); },
       onBotStoppedSpeaking() { speaking = false; lastAgent = null; show(); },
-      onDisconnected() { client = null; connected = false; speaking = false; show(); },
+      onDisconnected() {
+        if (client !== attempt) return;
+        client = null; connected = false; speaking = false;
+        if (wanted) retry(); else show();
+      },
     },
   });
+  client = attempt;
   try {
-    await client.connect({ webrtcRequestParams: { endpoint: "/api/offer" } });
-    connected = true;
+    await desktopApi("/desktop/prefs", { speed, voice });
+    await attempt.connect({ webrtcRequestParams: { endpoint: "/api/offer" } });
+    if (client !== attempt) return;
+    connected = true; retryStep = 0;
+    clearTimeout(retryTimer); retryTimer = null;
   } catch (error) {
+    if (client !== attempt) return;
     client = null;
+    attempt.disconnect().catch(() => {});
     $("hint").textContent = /permission|denied|notallowed/i.test(String(error)) ? "Allow the microphone for this page, then tap." : "Could not connect. Tap to try again.";
   }
-  show();
+  if (connected) show(); else retry();
 }
 
 function show(phase) {
-  const now = phase || (!connected ? "off" : muted ? "muted" : speaking ? "speaking" : "listening");
+  const now = phase || (!connected ? (wanted ? "reconnecting" : "off") : muted ? "muted" : speaking ? "speaking" : "listening");
   const [status, hint, label] = {
+    reconnecting: ["Reconnecting…", "", "Reconnecting"],
     connecting: ["Connecting", "", "Connecting"],
     off: ["Not connected", $("hint").textContent || "Tap to connect.", "Connect"],
     muted: ["Muted", "Tap to unmute.", "Unmute"],
@@ -568,7 +616,7 @@ async function poll() {
     if (now.muted !== muted) { muted = now.muted; show(); }
     const saved = config !== undefined && now.config !== config;  // in the settings page or the file
     config = now.config;
-    if (saved && connected && $("setup").classList.contains("hidden")) location.reload();
+    if (saved && connected && $("setup").classList.contains("hidden")) restart();
   } catch { /* the server restarts or stops; the next poll tells */ }
   setTimeout(poll, 2000);
 }
@@ -584,7 +632,18 @@ $("anyway").addEventListener("click", start);
 $("tip-close").addEventListener("click", () => $("tip").classList.add("hidden"));
 $("gear").addEventListener("click", showSetup);
 $("back").addEventListener("click", event => { event.preventDefault(); $("setup").classList.add("hidden"); $("talk").classList.remove("hidden"); });
-addEventListener("pagehide", () => client?.disconnect());
+for (const event of ["pageshow", "focus", "online"]) addEventListener(event, wake);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
+for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () => {
+  if (id === "speed") speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
+  else voice = voices[(voices.indexOf(voice) + 1) % voices.length];
+  renderPrefs();
+  try {
+    localStorage.setItem("voice-relay.speed", String(speed));
+    localStorage.setItem("voice-relay.voice", voice);
+  } catch { /* storage can be disabled */ }
+  await desktopApi("/desktop/prefs", { speed, voice }).catch(() => {});
+});
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 
 await Promise.all(["wa-button"].map(tag => customElements.whenDefined(tag)));

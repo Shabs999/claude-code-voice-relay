@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.frames.frames import LLMMessagesAppendFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
@@ -94,6 +95,8 @@ class Bridge:
         self.sessions = Sessions()
         self.interval = interval
         self._worker: PipelineWorker | None = None
+        self._missed: deque[tuple[float, str, str, str]] = deque(maxlen=50)
+        self.tts_provider = ""
         self._progress: list[tuple[Session, str]] = []
         self._narrated = 0.0
         self._asked = 0.0
@@ -165,6 +168,9 @@ class Bridge:
 
     def progress(self, session: Session, line: str) -> None:
         session.running, session.waiting = True, False
+        if self._worker is None:
+            self._remember("progress", session.name, line)
+            return
         self._progress.append((session, line))
         if self._narration is None or self._narration.done():
             self._narration = asyncio.create_task(self._narrate())
@@ -183,12 +189,12 @@ class Bridge:
         self._drop(session)
         if stopped:  # the operator asked for it and heard it confirmed
             return True
-        return await self._append(ANSWER.format(name=session.name, answer=text))
+        return await self._append(ANSWER.format(name=session.name, answer=text), missed=("answer", session.name, text))
 
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         self._drop(session)
-        return await self._append(WAITING.format(name=session.name, action=action))
+        return await self._append(WAITING.format(name=session.name, action=action), missed=("waiting", session.name, action))
 
     async def _send_task(self, params: FunctionCallParams) -> None:
         found = self.sessions.find(str(params.arguments.get("session") or ""))
@@ -268,9 +274,50 @@ class Bridge:
         self._notices.add(task)
         task.add_done_callback(self._notices.discard)
 
-    async def _append(self, content: str, *, run: bool = True) -> bool:
+    def _prune_missed(self) -> None:
+        cutoff = time.monotonic() - 600
+        while self._missed and self._missed[0][0] < cutoff:
+            self._missed.popleft()
+
+    def _remember(self, kind: str, name: str, text: str) -> None:
+        self._prune_missed()
+        previous = next((item for item in reversed(self._missed) if item[2] == name), None)
+        if previous is not None and previous[3] == text:
+            return
+        if kind == "progress":
+            self._missed = deque(
+                (item for item in self._missed if item[1:3] != (kind, name)), maxlen=50
+            )
+        self._missed.append((time.monotonic(), kind, name, text))
+
+    async def replay(self) -> None:
+        """Called after the client-ready greeting has been queued."""
+        self._prune_missed()
+        if not self._missed or self._worker is None:
+            return
+        lines = ["While no voice page was connected, these arrived (oldest first, briefing order):"]
+        for kind, label in (("waiting", "Approvals waiting at the screen"),
+                            ("progress", "Progress (in progress)"), ("answer", "Answers (finished)")):
+            items = [f"{name}: {text}" for _, k, name, text in self._missed if k == kind]
+            if items:
+                lines.extend([label + ":", *items])
+        lines.append("Give ONE short catch-up: blocked-on-operator first, then in progress, then done, no repetition.")
+        await self._append("\n".join(lines))
+        self._missed.clear()
+
+    async def update_prefs(self, speed: float, voice: str) -> None:
+        if self._worker is not None and self.tts_provider == "openai":
+            await self._worker.queue_frame(
+                TTSUpdateSettingsFrame(settings={"voice": voice, "speed": speed})
+            )
+
+    async def _append(
+        self, content: str, *, run: bool = True, missed: tuple[str, str, str] | None = None
+    ) -> bool:
         worker = self._worker
         if worker is None:
+            if missed is not None:
+                self._remember(*missed)
             return False
         message: Any = {"role": DEVELOPER, "content": content}
         if run:

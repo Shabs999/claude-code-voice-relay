@@ -109,6 +109,8 @@ Next times, `/voice-relay` opens the window, and it connects by itself.
 
 Next times, the voice window connects by itself and shows the linked sessions, what each one does, and the conversation. Tap the microphone to mute. The gear opens the three parts again. If the window does not open by itself, open http://127.0.0.1:7860/voice.
 
+The two chips below the status cycle speech speed (default 1.5×) and voice, saved per browser. The page reconnects automatically and gives one short catch-up of missed approvals, progress and answers from the last 10 minutes.
+
 ### Several sessions
 
 Run `/voice-relay` in each session you want to talk to. Each session links under its folder name, for example `shop` and `api`. Name the session when you speak: "in api, run the tests". With one session linked, no name is needed. If the agent cannot tell which session you mean, it asks.
@@ -175,7 +177,7 @@ The settings page lists the voices of the provider with samples and the OpenRout
 | Text-to-speech | `VOICE_RELAY_TTS` | `elevenlabs` `cartesia` `openai` `deepgram` `kokoro` `piper` `pocket` `compatible` | `elevenlabs` |
 | Voice | `VOICE_RELAY_TTS_VOICE` | provider voice id | provider default |
 | Speaking style | `VOICE_RELAY_TTS_INSTRUCTIONS` | a short style sentence, e.g. `warm and quick`; OpenAI `gpt-4o-mini-tts` only | empty |
-| Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `1.2` | `1.0` |
+| Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `2.0` | `1.0` |
 | Progress interval | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
 | Projects folder | `VOICE_RELAY_PROJECTS` | a folder with your projects | none |
 | Extra allowed hosts | `VOICE_RELAY_HOSTS` | comma-separated `host[:port]`, e.g. `ubuntu-4gb-hel1-2.tail90c2a0.ts.net:7860` | empty |

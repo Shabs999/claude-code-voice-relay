@@ -21,3 +21,8 @@ def test_your_server_reads_and_checks_each_stage_the_same_way() -> None:
     assert [(s.url, s.key, s.model) for s in (loaded.stt, loaded.llm, loaded.tts)] == [
         (f"{stage} URL", f"{stage} KEY", f"{stage} MODEL") for stage in ("STT", "LLM", "TTS")
     ]
+
+
+def test_openai_speed_ceiling() -> None:
+    assert settings.load({"VOICE_RELAY_TTS_SPEED": "2.0"}).speed == 2.0
+    assert settings.load({"VOICE_RELAY_TTS_SPEED": "2.5"}).speed == 2.0

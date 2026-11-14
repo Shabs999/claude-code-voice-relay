@@ -190,3 +190,50 @@ async def test_a_held_task_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     await bridge.link("late", "late", str(tmp_path))
     assert (await bridge.sessions["late"].next(1))["kind"] == CONTEXT  # type: ignore[index]
     assert (await bridge.sessions["late"].next(0.01)) is None
+
+
+async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    bridge = Bridge(interval=0)
+    await bridge.link("shop", "shop", "")
+    session = bridge.sessions["shop"]
+    assert not await bridge.answer(session, "expired")
+    clock[0] += 601
+    assert not await bridge.answer(session, "finished")
+    assert not await bridge.answer(session, "finished")
+    bridge.progress(session, "old progress")
+    bridge.progress(session, "still working")
+    assert not await bridge.waiting(session, "approve command")
+    await bridge.typed(session, "context only")
+    await bridge.history(session, "history only")
+    assert [(kind, text) for _, kind, _, text in bridge._missed] == [
+        ("answer", "finished"), ("progress", "still working"), ("waiting", "approve command")
+    ]
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge._append("greeting")
+    await bridge.replay()  # the client-ready path queues its greeting first
+    await bridge.replay()
+    assert len(worker.frames) == 2
+    frame = worker.frames[1]
+    assert frame.run_llm and frame.messages[0]["role"] == "developer"
+    text = frame.messages[0]["content"]
+    assert text.index("shop: approve command") < text.index("shop: still working") < text.index("shop: finished")
+    assert not bridge._missed
+
+
+async def test_missed_updates_have_count_and_replay_age_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    bridge = Bridge(interval=0)
+    await bridge.link("shop", "shop", "")
+    for i in range(60):
+        await bridge.answer(bridge.sessions["shop"], str(i))
+    assert len(bridge._missed) == 50
+    assert bridge._missed[0][3] == "10"
+    clock[0] += 601
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge.replay()
+    assert not worker.frames and not bridge._missed
