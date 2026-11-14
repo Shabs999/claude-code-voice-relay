@@ -81,6 +81,7 @@ FIELDS = (
     "VOICE_RELAY_TTS",
     "VOICE_RELAY_TTS_MODEL",
     "VOICE_RELAY_TTS_VOICE",
+    "VOICE_RELAY_TTS_INSTRUCTIONS",
     "VOICE_RELAY_TTS_URL",
     "VOICE_RELAY_TTS_SPEED",
     "VOICE_RELAY_PROJECTS",
@@ -104,6 +105,7 @@ class Service:
     model: str = ""
     language: str = ""
     voice: str = ""
+    instructions: str = ""
     url: str = ""
     key: str = ""
     body: str = ""
@@ -258,6 +260,7 @@ def _service(env: Mapping[str, str], stage: str, options: tuple[str, ...]) -> Se
         model=_text(env, f"{name}_MODEL"),
         language=_text(env, f"{name}_LANGUAGE"),
         voice=_text(env, f"{name}_VOICE"),
+        instructions=_text(env, f"{name}_INSTRUCTIONS"),
         url=APPS.get(provider) or (_text(env, f"{name}_URL") if provider == SERVER else ""),
         key=_text(env, f"{name}_KEY") if provider in SERVERS else _key(env, provider),
         body=_body(env) if stage == "LLM" else "",

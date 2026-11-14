@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import pytest
 from openai._utils import strip_not_given
+from pipecat.services.openai.tts import OpenAITTSService
+from pipecat.utils.types import NotGiven
 
-from voice_relay.services import _marked, llm
+from voice_relay import settings
+from voice_relay.services import _marked, llm, tts
 from voice_relay.settings import Service
 
 
@@ -28,3 +31,26 @@ def test_llm_token_cap_uses_the_provider_parameter(provider: str, cap: int) -> N
     other = "max_tokens" if provider == "openai" else "max_completion_tokens"
     assert params[expected] == cap
     assert other not in params
+
+
+def test_openai_tts_instructions_are_only_given_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = []
+    monkeypatch.setattr(
+        OpenAITTSService, "__init__", lambda self, **kwargs: captured.append(kwargs["settings"])
+    )
+    env = {
+        "VOICE_RELAY_TTS": "openai",
+        "VOICE_RELAY_TTS_MODEL": "gpt-4o-mini-tts",
+        "VOICE_RELAY_TTS_VOICE": "ash",
+        "VOICE_RELAY_TTS_INSTRUCTIONS": "warm and quick",
+    }
+    loaded = settings.load(env)
+    tts(loaded.tts, speed=loaded.speed)
+    assert captured[-1].model == "gpt-4o-mini-tts"
+    assert captured[-1].voice == "ash"
+    assert captured[-1].instructions == "warm and quick"
+
+    del env["VOICE_RELAY_TTS_INSTRUCTIONS"]
+    loaded = settings.load(env)
+    tts(loaded.tts, speed=loaded.speed)
+    assert isinstance(captured[-1].instructions, NotGiven)

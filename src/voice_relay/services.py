@@ -175,8 +175,9 @@ def tts(service: Service, *, speed: float) -> TTSService:
         case "openai":
             from pipecat.services.openai.tts import OpenAITTSService
 
+            instructions = service.instructions
             settings = OpenAITTSService.Settings(
-                **_given({"model": model, "voice": voice}), speed=speed
+                **_given({"model": model, "voice": voice, "instructions": instructions}), speed=speed
             )
             return OpenAITTSService(api_key=key, settings=settings)
         case _:

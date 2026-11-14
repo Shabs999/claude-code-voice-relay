@@ -174,6 +174,7 @@ The settings page lists the voices of the provider with samples and the OpenRout
 | LLM model | `VOICE_RELAY_LLM_MODEL` | provider model name | Claude Haiku 5.5 on OpenRouter and Anthropic, `gpt-6-luna` on OpenAI, `gemini-3.6-flash` on Google, `openai/gpt-oss-120b` on Groq |
 | Text-to-speech | `VOICE_RELAY_TTS` | `elevenlabs` `cartesia` `openai` `deepgram` `kokoro` `piper` `pocket` `compatible` | `elevenlabs` |
 | Voice | `VOICE_RELAY_TTS_VOICE` | provider voice id | provider default |
+| Speaking style | `VOICE_RELAY_TTS_INSTRUCTIONS` | a short style sentence, e.g. `warm and quick`; OpenAI `gpt-4o-mini-tts` only | empty |
 | Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `1.2` | `1.0` |
 | Progress interval | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
 | Projects folder | `VOICE_RELAY_PROJECTS` | a folder with your projects | none |
