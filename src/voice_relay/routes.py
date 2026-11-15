@@ -129,6 +129,18 @@ def mount(
         bridge.progress(linked(request), _text(await _body(request), "line"))
         return Response(status_code=204)
 
+    @app.get("/claude/context")
+    async def voice_context(request: Request) -> Response:
+        session = linked(request)
+        context = session.record.deliver(session.name)
+        return Response(status_code=204) if context is None else JSONResponse(context)
+
+    @app.post("/claude/context/ack")
+    async def ack_context(request: Request) -> Response:
+        session = linked(request)
+        session.record.ack(_text(await _body(request), "id"))
+        return Response(status_code=204)
+
     @app.post("/claude/context")
     async def context(request: Request) -> Response:
         session, body = linked(request), await _body(request)

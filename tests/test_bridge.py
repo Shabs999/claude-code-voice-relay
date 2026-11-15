@@ -97,8 +97,8 @@ async def test_an_answer_drops_only_its_session_progress() -> None:
         "Claude Code in shop finished"
     )
     assert bridge.state() == [
-        {"name": "shop", "running": False, "waiting": False},
-        {"name": "api", "running": True, "waiting": False},
+        {"name": "shop", "running": False, "waiting": False, "pending_lines": 0},
+        {"name": "api", "running": True, "waiting": False, "pending_lines": 0},
     ]
     assert [line for _, line in bridge._progress] == ["reads the log"]
 

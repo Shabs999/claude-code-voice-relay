@@ -349,3 +349,13 @@ Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBU
 ---
 
 voice-relay is made by [Softcery](https://softcery.com). We build voice AI agents for products: low latency, natural turn-taking, self-hosted stacks.
+
+## One conversation
+
+Voice exchanges record Shahab's words verbatim and the Dispatcher's substantive replies per
+linked session, with interrupted replies marked and no-action exchanges identified. Routine
+fillers and relays of the session's own updates are filtered. Context appears below the next
+task line; nothing is delivered on its own. The plug-in can also fetch context with authorised
+`GET /claude/context` (200 with `id` and `text`, or 204), using `x-claude-session`, and confirms
+submission with `POST /claude/context/ack` and `{"id": "…"}`. Unconfirmed blocks retain their id
+and become available again after 60 seconds.

@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .record import Record
+
 TASK = "task"
 ABORT = "abort"
 CONTEXT = "context"
@@ -21,6 +23,7 @@ Command = dict[str, str]
 @dataclass(eq=False)
 class Session:
     name: str
+    record: Record = field(default_factory=Record)
     folder: str = ""
     commands: asyncio.Queue[Command] = field(default_factory=asyncio.Queue)
     polls: int = 0
@@ -39,7 +42,13 @@ class Session:
         return self.polls == 0 and time.monotonic() - self.polled > STALE_SECONDS
 
     def send(self, kind: str, text: str = "") -> None:
-        self.commands.put_nowait({"kind": kind, "text": text})
+        command = {"kind": kind, "text": text}
+        if kind == TASK:
+            context = self.record.deliver(self.name)
+            if context is not None:
+                command["text"] += "\n\n" + context["text"]
+                command["context_id"] = context["id"]
+        self.commands.put_nowait(command)
 
     async def next(self, seconds: float) -> Command | None:
         """Gives the next command, or None after the wait. A history request goes out once."""
@@ -66,7 +75,7 @@ class Sessions:
 
     def __init__(self) -> None:
         self._by_id: dict[str, Session] = {}
-        self._held: dict[str, tuple[str, float]] = {}
+        self._held: dict[str, tuple[str, float, Record | None]] = {}
 
     def __contains__(self, session_id: str) -> bool:
         return session_id in self._by_id
@@ -87,14 +96,16 @@ class Sessions:
     def unlink(self, session_id: str) -> bool:
         return self._by_id.pop(session_id, None) is not None
 
-    def hold(self, folder: Path, task: str) -> None:
-        self._held[str(folder.resolve())] = (task, time.monotonic())
+    def hold(self, folder: Path, task: str, record: Record | None = None) -> None:
+        self._held[str(folder.resolve())] = (task, time.monotonic(), record)
 
     def release(self, session: Session) -> None:
         """Sends the task held for the session's folder, unless it waited past HOLD_SECONDS:
         a session the operator opens by hand an hour later must not run it."""
         held = self._held.pop(session.folder, None) if session.folder else None
         if held is not None and time.monotonic() - held[1] < HOLD_SECONDS:
+            if held[2] is not None:
+                session.record = held[2]
             session.running = True
             session.send(TASK, held[0])
 

@@ -15,7 +15,8 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
-from .sessions import ABORT, TASK, Session, Sessions
+from .record import Line, filler
+from .sessions import ABORT, TASK, Session, Sessions, key
 
 DEVELOPER = "developer"
 ANSWER = "Claude Code in {name} finished its turn. Its final text:\n\n{answer}"
@@ -94,6 +95,12 @@ class Bridge:
 
     def __init__(self, *, interval: float) -> None:
         self.sessions = Sessions()
+        self._exchange: list[Line] = []
+        self._fragment_at = 0.0
+        self._join = False
+        self._target: Session | None = None
+        self._acted = False
+        self._relay = False
         self.interval = interval
         self._catchup_seconds = settings.catchup_seconds()
         self._worker: PipelineWorker | None = None
@@ -110,6 +117,55 @@ class Bridge:
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
+
+    def operator_said(self, text: str) -> None:
+        if not text.strip():
+            return
+        now = time.time()
+        if self._join and self._exchange and now - self._fragment_at < 20:
+            self._exchange[-1].text += " " + text
+        else:
+            self._exchange.append(Line(now, "Shahab", text))
+        self._fragment_at, self._join, self._relay = now, True, False
+
+    def tool_called(self) -> None:
+        self._join = False
+
+    def _route_exchange(self) -> Session | None:
+        if self._target is not None:
+            return self._target
+        sessions = self.sessions.live()
+        if len(sessions) == 1:
+            return sessions[0]
+        spoken = key(" ".join(line.text for line in self._exchange if line.speaker == "Shahab"))
+        matches = [session for session in sessions if key(session.name) in spoken]
+        if len(matches) == 1:
+            found = self.sessions.find(matches[0].name)
+            return found if isinstance(found, Session) else None
+        return None
+
+    def _flush_exchange(self) -> None:
+        target = self._route_exchange()
+        if target is not None:
+            target.record.lines.extend(self._exchange)
+        self._exchange = []
+        self._join = False
+
+    def dispatcher_said(self, text: str, cut: bool = False) -> None:
+        self._finish_exchange(text, cut)
+
+    def dispatcher_silent(self) -> None:
+        self._finish_exchange("")
+
+    def _finish_exchange(self, text: str, cut: bool = False) -> None:
+        operator = any(line.speaker == "Shahab" for line in self._exchange)
+        reply = text + (" (cut)" if cut else "")
+        if text and not filler(text) and not (self._relay and not operator):
+            self._exchange.append(Line(time.time(), "Dispatcher", reply))
+        if operator and not self._acted:
+            self._exchange.append(Line(time.time(), "no-action", reply or "(said nothing)"))
+        self._flush_exchange()
+        self._target, self._acted = None, False
 
     def register(self, llm: LLMService[Any]) -> None:
         llm.register_function(SEND_TASK.name, self._send_task)
@@ -169,7 +225,8 @@ class Bridge:
 
     def state(self) -> list[dict[str, Any]]:
         return [
-            {"name": session.name, "running": session.running, "waiting": session.waiting}
+            {"name": session.name, "running": session.running, "waiting": session.waiting,
+             "pending_lines": session.record.pending_lines}
             for session in self.sessions.all()
         ]
 
@@ -254,6 +311,8 @@ class Bridge:
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
             return
+        self._target, self._acted = found, True
+        self._flush_exchange()
         busy, found.running = found.running, True
         found.send(TASK, QUOTE.format(text=str(params.arguments.get("text", ""))))
         after = ", Claude Code starts it after the current turn" if busy else ""
@@ -264,6 +323,8 @@ class Bridge:
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
             return
+        self._target, self._acted = found, True
+        self._flush_exchange()
         found.stopping = True
         found.send(ABORT)
         then = str(params.arguments.get("then") or "").strip()
@@ -288,7 +349,9 @@ class Bridge:
             await params.result_callback(f"not opened: {error}")
             return
         if task:
-            self.sessions.hold(folder, QUOTE.format(text=task))
+            self._target, self._acted = Session(folder.name), True
+            self._flush_exchange()
+            self.sessions.hold(folder, QUOTE.format(text=task), self._target.record)
         held = " The task goes to it once it links." if task else ""
         opened = OPENED.format(folder=folder.name, what=RESUMED if resume else "Claude Code")
         trust = "" if terminal.trusted(folder) else UNTRUSTED
@@ -387,6 +450,7 @@ class Bridge:
             return False
         message: Any = {"role": DEVELOPER, "content": content}
         if run:
+            self._relay = True
             self._asked = time.monotonic()
         await worker.queue_frame(LLMMessagesAppendFrame(messages=[message], run_llm=run))
         return True

@@ -10,6 +10,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    UserStartedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
@@ -76,3 +77,40 @@ class Preamble(FrameProcessor):
         held, self._held, self._chars, self._holding = self._held, [], 0, False
         for frame in held:
             await self.push_frame(frame)
+
+
+class SpokenReply(FrameProcessor):
+    """Records the text surviving Preamble, immediately before synthesis."""
+
+    def __init__(self, bridge) -> None:
+        super().__init__()
+        self._bridge = bridge
+        self._parts: list[str] = []
+        self._active = False
+        self._tool = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if direction is FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._parts, self._active, self._tool = [], True, False
+            elif isinstance(frame, LLMTextFrame) and self._active:
+                self._parts.append(frame.text)
+            elif isinstance(frame, FunctionCallsStartedFrame):
+                self._tool = True
+                self._bridge.tool_called()
+            elif isinstance(frame, (InterruptionFrame, UserStartedSpeakingFrame)):
+                self._finish(cut=True)
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                self._finish()
+        await self.push_frame(frame, direction)
+
+    def _finish(self, cut: bool = False) -> None:
+        if not self._active:
+            return
+        text = "".join(self._parts).strip()
+        if text:
+            self._bridge.dispatcher_said(text, cut=cut)
+        elif not self._tool:
+            self._bridge.dispatcher_silent()
+        self._parts, self._active = [], False
