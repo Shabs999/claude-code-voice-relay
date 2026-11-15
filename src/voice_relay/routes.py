@@ -129,6 +129,31 @@ def mount(
         bridge.progress(linked(request), _text(await _body(request), "line"))
         return Response(status_code=204)
 
+    @app.post("/claude/update")
+    async def update(request: Request) -> Response:
+        session = linked(request)
+        body = await _body(request)
+        kind = _text(body, "kind")
+        if kind not in ("needs-you", "milestone", "done"):
+            raise HTTPException(400, "kind: expected needs-you, milestone or done")
+        text = _text(body, "text").strip()
+        if not text:
+            raise HTTPException(400, "text: expected non-empty text")
+        options = body.get("options")
+        if "options" in body:
+            if not isinstance(options, list) or not 2 <= len(options) <= 4 or any(
+                not isinstance(option, str) or not option.strip() for option in options
+            ):
+                raise HTTPException(400, "options: expected 2 to 4 non-empty strings")
+            options = [option.strip()[:60] for option in options]
+        subagent = body.get("subagent", False)
+        if not isinstance(subagent, bool):
+            raise HTTPException(400, "subagent: expected true or false")
+        outcome = await bridge.update(
+            session, kind, text[:200], options if kind == "needs-you" else None, subagent
+        )
+        return JSONResponse({"outcome": outcome})
+
     @app.get("/claude/context")
     async def voice_context(request: Request) -> Response:
         session = linked(request)

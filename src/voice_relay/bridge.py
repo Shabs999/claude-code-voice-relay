@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,16 @@ WAITING = "Claude Code in {name} waits at the screen for the operator to approve
 TYPED = "The operator typed this to Claude Code in {name} directly:\n\n{text}"
 LINKED = "Claude Code sessions linked now: {names}."
 QUOTE = 'The operator says, through the voice link: "{text}"'
+UPDATE_ONE = (
+    "The {name} session says, in its own words: {text}\n"
+    "Say it once, in these words or shorter, naming the session once. {options}"
+)
+UPDATE_MANY = (
+    "Session updates:\n{updates}\n"
+    "Give ONE short briefing, blocked-on-the-operator items first, then in progress, "
+    "then done, oldest first inside each group, no repetition."
+)
+UPDATE_DEDUPE_SECONDS = 600.0
 DROP_SECONDS = 20.0
 QUIET_SECONDS = 1.5
 REPLY_SECONDS = 4.0  # a message that runs the LLM: its spoken reply starts within this time
@@ -90,6 +101,27 @@ OPEN_SESSION = FunctionSchema(
 TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION)
 
 
+@dataclass
+class Update:
+    session: Session
+    kind: str
+    text: str
+    options: list[str] | None
+    subagent: bool
+    at: float
+    wall: float
+
+    def words(self) -> str:
+        helper = " (a helper inside that session)" if self.subagent else ""
+        return self.text + helper
+
+    def choices(self) -> str:
+        if not self.options:
+            return ""
+        numbered = "; ".join(f"{i}: {text}" for i, text in enumerate(self.options, 1))
+        return f"Read these options numbered, one to {len(self.options)}: {numbered}"
+
+
 class Bridge:
     """The linked sessions, and the one live voice worker that hears about them."""
 
@@ -110,6 +142,9 @@ class Bridge:
         self._replayed_at: float | None = None
         self._replayed_worker: PipelineWorker | None = None
         self.tts_provider = ""
+        self._updates: list[Update] = []
+        self._speaker: asyncio.Task[None] | None = None
+        self._update_seen: list[tuple[Update, str]] = []
         self._progress: list[tuple[Session, str]] = []
         self._narrated = 0.0
         self._asked = 0.0
@@ -226,7 +261,10 @@ class Bridge:
     def state(self) -> list[dict[str, Any]]:
         return [
             {"name": session.name, "running": session.running, "waiting": session.waiting,
-             "pending_lines": session.record.pending_lines}
+             "pending_lines": session.record.pending_lines,
+             "queued_updates": sum(item.session is session for item in self._updates)
+             + sum(k.startswith("update-") and name == session.name
+                   for _, k, name, _, _ in self._missed)}
             for session in self.sessions.all()
         ]
 
@@ -279,6 +317,71 @@ class Bridge:
         self._progress.append((session, line))
         if self._narration is None or self._narration.done():
             self._narration = asyncio.create_task(self._narrate())
+
+    async def update(
+        self, session: Session, kind: str, text: str,
+        options: list[str] | None, subagent: bool,
+    ) -> str:
+        now = time.monotonic()
+        self._prune_missed()
+        pending = {item[0] for item in self._missed if item[1].startswith("update-")}
+        self._update_seen = [
+            (item, outcome) for item, outcome in self._update_seen
+            if now - item.at < UPDATE_DEDUPE_SECONDS or item.at in pending
+        ]
+        for item, outcome in self._update_seen:
+            if (item.session is session and item.text == text
+                    and now - item.at < UPDATE_DEDUPE_SECONDS):
+                return outcome
+        if kind == "needs-you":
+            session.waiting = True
+        item = Update(session, kind, text, options, subagent, now, time.time())
+
+        def replaces(old: Update) -> bool:
+            return old.session is session and old.kind != "needs-you" and (
+                (kind == "milestone" and old.kind == "milestone")
+                or (subagent and old.subagent)
+            )
+
+        self._updates = [old for old in self._updates if not replaces(old)]
+        replaced = {old.at for old, _ in self._update_seen if replaces(old)}
+        self._missed = deque(
+            (old for old in self._missed
+             if not (old[1].startswith("update-") and old[0] in replaced)), maxlen=500
+        )
+        outcome = "queued" if self._worker is None else "spoken"
+        self._update_seen.append((item, outcome))
+        if self._worker is None:
+            self._remember_update(item)
+        else:
+            self._updates.append(item)
+            if self._speaker is None or self._speaker.done():
+                self._speaker = asyncio.create_task(self._speak_updates())
+        return outcome
+
+    def _remember_update(self, item: Update) -> None:
+        self._remember("update-" + item.kind, item.session.name,
+                       "\n".join(filter(None, (item.words(), item.choices()))),
+                       at=item.at, wall=item.wall)
+
+    async def _speak_updates(self) -> None:
+        while self._updates:
+            await self._wait_quiet()
+            items, self._updates = self._updates, []
+            if len(items) < 3:
+                content = "\n\n".join(UPDATE_ONE.format(
+                    name=item.session.name, text=item.words(), options=item.choices()
+                ) for item in items)
+            else:
+                order = {"needs-you": 0, "milestone": 1, "done": 2}
+                items.sort(key=lambda item: (order[item.kind], item.at))
+                content = UPDATE_MANY.format(updates="\n".join(
+                    f"{item.session.name} ({item.kind}): {item.words()} {item.choices()}"
+                    for item in items
+                ))
+            if not await self._append(content):
+                for item in items:
+                    self._remember_update(item)
 
     async def history(self, session: Session, text: str) -> bool:
         return await self._append(HISTORY.format(name=session.name, history=text), run=False)
@@ -364,6 +467,13 @@ class Bridge:
 
     async def _narrate(self) -> None:
         await asyncio.sleep(max(0.0, self._narrated + self.interval - time.monotonic()))
+        await self._wait_quiet()
+        lines, self._progress = self._progress, []
+        text = "\n".join(f"{session.name}: {line}" for session, line in lines)
+        if lines and await self._append(PROGRESS.format(progress=text)):
+            self._narrated = time.monotonic()
+
+    async def _wait_quiet(self) -> None:
         # wait for a lasting pause, after the spoken reply to the last message began:
         # the operator can be about to speak, and a reply still in the LLM misses this progress
         while True:
@@ -371,10 +481,6 @@ class Bridge:
             await asyncio.sleep(max(QUIET_SECONDS, self._asked + REPLY_SECONDS - time.monotonic()))
             if self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS:
                 break
-        lines, self._progress = self._progress, []
-        text = "\n".join(f"{session.name}: {line}" for session, line in lines)
-        if lines and await self._append(PROGRESS.format(progress=text)):
-            self._narrated = time.monotonic()
 
     def _drop(self, session: Session | None = None) -> None:
         self._progress = [held for held in self._progress if session not in (None, held[0])]
@@ -395,7 +501,10 @@ class Bridge:
         while self._missed and self._missed[0][0] < cutoff:
             self._missed.popleft()
 
-    def _remember(self, kind: str, name: str, text: str) -> None:
+    def _remember(
+        self, kind: str, name: str, text: str, *,
+        at: float | None = None, wall: float | None = None,
+    ) -> None:
         self._prune_missed()
         previous = next((item for item in reversed(self._missed) if item[2] == name), None)
         if previous is not None and previous[3] == text:
@@ -404,7 +513,8 @@ class Bridge:
             self._missed = deque(
                 (item for item in self._missed if item[1:3] != (kind, name)), maxlen=500
             )
-        self._missed.append((time.monotonic(), kind, name, text, time.time()))
+        self._missed.append((time.monotonic() if at is None else at, kind, name, text,
+                             time.time() if wall is None else wall))
 
     async def replay(self) -> None:
         """Called after the client-ready greeting has been queued."""
@@ -412,15 +522,15 @@ class Bridge:
         if not self._missed or self._worker is None or self._replayed_worker is self._worker:
             return
         lines = ["While no voice page was connected, these arrived (oldest first, briefing order):"]
-        for kind, label in (
-            ("waiting", "Approvals waiting at the screen"),
-            ("progress", "Progress (in progress)"),
-            ("answer", "Answers (finished)"),
+        for kinds, label in (
+            (("waiting", "update-needs-you"), "Approvals and decisions waiting on the operator"),
+            (("progress", "update-milestone"), "Progress (in progress)"),
+            (("answer", "update-done"), "Answers (finished)"),
         ):
             items = [
                 f"{time.strftime('%-I:%M %p', time.localtime(wall))} — {name}: {text}"
-                for _, k, name, text, wall in self._missed
-                if k == kind
+                for _, k, name, text, wall in sorted(self._missed, key=lambda item: item[4])
+                if k in kinds
             ]
             if items:
                 lines.extend([label + ":", *items])
@@ -430,9 +540,15 @@ class Bridge:
             "items one by one, then ONE sentence each for in-progress and done, grouped by "
             "project, oldest first; never list more than ten lines aloud."
         )
-        self._replayed_at = time.monotonic()
+        replayed = time.monotonic()
+        self._replayed_at = replayed
         self._replayed_worker = self._worker
-        await self._append("\n".join(lines))
+        if await self._append("\n".join(lines)):
+            self._missed = deque(
+                (item for item in self._missed
+                 if not (item[1].startswith("update-") and item[0] <= replayed)),
+                maxlen=500,
+            )
 
     async def update_prefs(self, speed: float, voice: str) -> None:
         if self._worker is not None and self.tts_provider == "openai":
