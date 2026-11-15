@@ -44,3 +44,21 @@ def test_idle_seconds(monkeypatch) -> None:
         )
         with pytest.raises(settings.SettingsError):
             settings.idle_seconds()
+
+
+def test_catchup_seconds(monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setattr(settings, "environment", lambda: {})
+    assert settings.catchup_seconds() == 28800.0
+    for value, expected in (("60", 60.0), ("3600", 3600.0), ("86400", 86400.0)):
+        monkeypatch.setattr(
+            settings, "environment", lambda value=value: {"VOICE_RELAY_CATCHUP_SECONDS": value}
+        )
+        assert settings.catchup_seconds() == expected
+    for value in ("59", "86401", "abc", "nan"):
+        monkeypatch.setattr(
+            settings, "environment", lambda value=value: {"VOICE_RELAY_CATCHUP_SECONDS": value}
+        )
+        with pytest.raises(settings.SettingsError):
+            settings.catchup_seconds()

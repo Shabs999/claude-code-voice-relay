@@ -201,9 +201,10 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
     bridge = Bridge(interval=0)
     await bridge.link("shop", "shop", "")
+    monkeypatch.setattr(bridge_module.time, "time", lambda: 1700000000.0)
     session = bridge.sessions["shop"]
     assert not await bridge.answer(session, "expired")
-    clock[0] += 601
+    clock[0] += 28860
     assert not await bridge.answer(session, "finished")
     assert not await bridge.answer(session, "finished")
     bridge.progress(session, "old progress")
@@ -211,7 +212,7 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     assert not await bridge.waiting(session, "approve command")
     await bridge.typed(session, "context only")
     await bridge.history(session, "history only")
-    assert [(kind, text) for _, kind, _, text in bridge._missed] == [
+    assert [(kind, text) for _, kind, _, text, _ in bridge._missed] == [
         ("answer", "finished"), ("progress", "still working"), ("waiting", "approve command")
     ]
     worker = Worker()
@@ -228,6 +229,8 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
         < text.index("shop: still working")
         < text.index("shop: finished")
     )
+    stamp = bridge_module.time.strftime("%-I:%M %p", bridge_module.time.localtime(1700000000))
+    assert f"{stamp} — shop: finished" in text
     assert bridge._missed
     clock[0] += 10
     bridge.detach(worker)  # type: ignore[arg-type]
@@ -241,11 +244,11 @@ async def test_missed_updates_have_count_and_replay_age_limits(
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
     bridge = Bridge(interval=0)
     await bridge.link("shop", "shop", "")
-    for i in range(60):
+    for i in range(501):
         await bridge.answer(bridge.sessions["shop"], str(i))
-    assert len(bridge._missed) == 50
-    assert bridge._missed[0][3] == "10"
-    clock[0] += 601
+    assert len(bridge._missed) == 500
+    assert bridge._missed[0][3] == "1"
+    clock[0] += 28860
     worker = Worker()
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
@@ -345,3 +348,17 @@ async def test_wanted_routes_persist_and_forget(
         assert response.json() == {"wanted": False}
         for task in list(bridge._drops.values()):
             task.cancel()
+
+
+def test_missed_updates_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(bridge_module.settings, "environment", lambda: {})
+    bridge = Bridge(interval=0)
+    assert bridge._catchup_seconds == 28800
+    bridge._remember("answer", "shop", "old")
+    clock[0] += 120
+    bridge._remember("answer", "shop", "recent")
+    clock[0] = 1000 + 8 * 3600 + 60
+    bridge._prune_missed()
+    assert [item[3] for item in bridge._missed] == ["recent"]

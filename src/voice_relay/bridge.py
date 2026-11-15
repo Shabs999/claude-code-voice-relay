@@ -95,8 +95,9 @@ class Bridge:
     def __init__(self, *, interval: float) -> None:
         self.sessions = Sessions()
         self.interval = interval
+        self._catchup_seconds = settings.catchup_seconds()
         self._worker: PipelineWorker | None = None
-        self._missed: deque[tuple[float, str, str, str]] = deque(maxlen=50)
+        self._missed: deque[tuple[float, str, str, str, float]] = deque(maxlen=500)
         self._last_dropped: tuple[str, float] | None = None
         self._drops: dict[str, asyncio.Task[None]] = {}
         self._replayed_at: float | None = None
@@ -137,7 +138,7 @@ class Bridge:
         if self._replayed_worker is worker:
             if self._replayed_at is not None and time.monotonic() - self._replayed_at >= 8:
                 self._missed = deque(
-                    (item for item in self._missed if item[0] > self._replayed_at), maxlen=50
+                    (item for item in self._missed if item[0] > self._replayed_at), maxlen=500
                 )
             self._replayed_worker = None
             self._replayed_at = None
@@ -327,7 +328,7 @@ class Bridge:
         task.add_done_callback(self._notices.discard)
 
     def _prune_missed(self) -> None:
-        cutoff = time.monotonic() - 600
+        cutoff = time.monotonic() - self._catchup_seconds
         while self._missed and self._missed[0][0] < cutoff:
             self._missed.popleft()
 
@@ -338,9 +339,9 @@ class Bridge:
             return
         if kind == "progress":
             self._missed = deque(
-                (item for item in self._missed if item[1:3] != (kind, name)), maxlen=50
+                (item for item in self._missed if item[1:3] != (kind, name)), maxlen=500
             )
-        self._missed.append((time.monotonic(), kind, name, text))
+        self._missed.append((time.monotonic(), kind, name, text, time.time()))
 
     async def replay(self) -> None:
         """Called after the client-ready greeting has been queued."""
@@ -353,12 +354,18 @@ class Bridge:
             ("progress", "Progress (in progress)"),
             ("answer", "Answers (finished)"),
         ):
-            items = [f"{name}: {text}" for _, k, name, text in self._missed if k == kind]
+            items = [
+                f"{time.strftime('%-I:%M %p', time.localtime(wall))} — {name}: {text}"
+                for _, k, name, text, wall in self._missed
+                if k == kind
+            ]
             if items:
                 lines.extend([label + ":", *items])
         lines.append(
             "Give ONE short catch-up: blocked-on-operator first, then in progress, then done, "
-            "no repetition."
+            "no repetition. If there are more than eight items, give the blocked-on-operator "
+            "items one by one, then ONE sentence each for in-progress and done, grouped by "
+            "project, oldest first; never list more than ten lines aloud."
         )
         self._replayed_at = time.monotonic()
         self._replayed_worker = self._worker

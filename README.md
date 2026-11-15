@@ -180,6 +180,7 @@ The settings page lists the voices of the provider with samples and the OpenRout
 | Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `2.0` | `1.0` |
 | Progress interval | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
 | Idle stop | `VOICE_RELAY_IDLE_SECONDS` | seconds ≥ `0`; `0` disables idle stop (restart required) | `600` |
+| Catch-up window | `VOICE_RELAY_CATCHUP_SECONDS` | seconds the server keeps missed updates for the next page | `28800` |
 | Projects folder | `VOICE_RELAY_PROJECTS` | a folder with your projects | none |
 | Extra allowed hosts | `VOICE_RELAY_HOSTS` | comma-separated `host[:port]`, e.g. `ubuntu-4gb-hel1-2.tail90c2a0.ts.net:7860` | empty |
 | Terminal | `VOICE_RELAY_TERMINAL` | a terminal command, macOS and Linux | the system terminal |
