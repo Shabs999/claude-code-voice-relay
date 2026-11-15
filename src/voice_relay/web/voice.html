@@ -186,6 +186,7 @@ const $ = id => document.getElementById(id);
 const audio = new Audio();
 let state = null, picks = {}, typed = {}, client = null, connected = false, muted = false, speaking = false, lastAgent = null;
 let wanted = false, retryTimer = null, retryStep = 0;
+let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
 let speed = 1.5, voice = "ash";
@@ -514,7 +515,11 @@ function retry() {
   retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay * 1000);
 }
 function wake() {
-  if (!wanted || client) return;
+  if (!wanted) return;
+  if (client) {
+    if (connected && lastPollVoice === false) restart();  // a live-looking but dead link; never cut a reconnect in progress
+    return;
+  }
   clearTimeout(retryTimer); retryTimer = null; retryStep = 0;
   connect();
 }
@@ -612,12 +617,21 @@ function renderSessions(sessions) {
 async function poll() {
   try {
     const now = await desktopApi("/desktop/state");
+    const back = pollFailCount > 0;
+    pollFailCount = 0;
+    lastPollVoice = now.voice;
     renderSessions(now.sessions);
     if (now.muted !== muted) { muted = now.muted; show(); }
     const saved = config !== undefined && now.config !== config;  // in the settings page or the file
     config = now.config;
-    if (saved && connected && $("setup").classList.contains("hidden")) restart();
-  } catch { /* the server restarts or stops; the next poll tells */ }
+    if (back && connected) { voiceMismatchCount = 0; restart(); }
+    else if (saved && connected && $("setup").classList.contains("hidden")) restart();
+    else if (connected && !now.voice) {
+      if (++voiceMismatchCount >= 2) { voiceMismatchCount = 0; restart(); }
+    } else voiceMismatchCount = 0;
+  } catch {
+    pollFailCount++;
+  }
   setTimeout(poll, 2000);
 }
 
