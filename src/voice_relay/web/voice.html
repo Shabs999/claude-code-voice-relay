@@ -184,7 +184,7 @@ const DOING = { working: "works", waiting: "waits for your OK", idle: "idle" };
 const KEPT_LINES = 80;
 const $ = id => document.getElementById(id);
 const audio = new Audio();
-let state = null, picks = {}, typed = {}, client = null, transport = null, localMicStream = null, connected = false, muted = false, speaking = false, lastAgent = null;
+let state = null, picks = {}, typed = {}, client = null, transport = null, localMicStream = null, connected = false, muted = true, speaking = false, lastAgent = null;
 let wanted = false, retryTimer = null, retryStep = 0;
 let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
@@ -514,8 +514,12 @@ function retry() {
   const delay = [1, 2, 4, 8, 16, 30][Math.min(retryStep++, 5)];
   retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay * 1000);
 }
+let connecting = null, lastWake = -Infinity;
 function wake() {
-  if (!wanted) return;
+  if (!wanted || connecting) return;
+  const now = performance.now();
+  if (now - lastWake < 1000) return;
+  lastWake = now;
   if (client) {
     if (connected && lastPollVoice === false) restart();  // a live-looking but dead link; never cut a reconnect in progress
     return;
@@ -523,11 +527,8 @@ function wake() {
   clearTimeout(retryTimer); retryTimer = null; retryStep = 0;
   connect();
 }
-async function restart() {
-  const previous = client;
-  client = null; transport = null; localMicStream = null; connected = false;
-  await previous?.disconnect().catch(() => {});
-  wake();
+function restart() {
+  return connect(true);
 }
 
 let micGeneration = 0;
@@ -579,9 +580,22 @@ async function muteHere() {
   await desktopApi("/desktop/mute", { muted: true }).catch(() => {});
 }
 
-async function connect() {
+function connect(replace = false) {
+  if (connecting) return connecting;
+  // Install the guard before any connection work starts.
+  connecting = Promise.resolve().then(() => openConnection(replace)).finally(() => { connecting = null; });
+  return connecting;
+}
+
+async function openConnection(replace) {
   wanted = true;
+  if (replace) {
+    const previous = client;
+    client = null; transport = null; localMicStream = null; connected = false;
+    await previous?.disconnect().catch(() => {});
+  }
   if (client) return;
+  muted = true;
   clearTimeout(retryTimer); retryTimer = null;
   show(retryStep ? "reconnecting" : "connecting");
   const link = new SmallWebRTCTransport();
@@ -616,7 +630,10 @@ async function connect() {
     if (client !== attempt) return;
     connected = true; retryStep = 0;
     clearTimeout(retryTimer); retryTimer = null;
-    if (muted) await releaseMic();
+    if (muted) {
+      await releaseMic();
+      await desktopApi("/desktop/mute", { muted: true });
+    }
   } catch (error) {
     if (client !== attempt) return;
     client = null; transport = null; localMicStream = null;
@@ -674,7 +691,7 @@ async function poll() {
     pollFailCount = 0;
     lastPollVoice = now.voice;
     renderSessions(now.sessions);
-    if (now.muted !== muted) {
+    if (connected && !connecting && now.muted !== muted) {
       const wasMuted = muted;
       muted = now.muted;
       if (muted && !wasMuted) await releaseMic();
