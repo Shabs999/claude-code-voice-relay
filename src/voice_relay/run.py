@@ -40,7 +40,7 @@ async def bot(runner_args: RunnerArguments) -> None:
     else:
         current = replace(current, speed=min(current.speed, 1.2))
     BRIDGE.tts_provider = current.tts.provider
-    BRIDGE.interval = current.narration_seconds
+    BRIDGE.quiet_seconds = current.quiet_minutes * 60
     params = {"webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True)}
     transport = await create_transport(runner_args, params)
     llm = services.llm(current.llm, prompt=current.prompt)

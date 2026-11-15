@@ -87,6 +87,7 @@ FIELDS = (
     "VOICE_RELAY_PROJECTS",
     "VOICE_RELAY_TERMINAL",
     "VOICE_RELAY_NARRATION_SECONDS",
+    "VOICE_RELAY_QUIET_MINUTES",
     "VOICE_RELAY_IDLE_SECONDS",
     "VOICE_RELAY_CATCHUP_SECONDS",
 )
@@ -120,6 +121,7 @@ class Settings:
     tts: Service
     prompt: str
     greeting: str
+    quiet_minutes: float
     narration_seconds: float
     speed: float
 
@@ -139,6 +141,7 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         tts=_service(env, "TTS", TTS),
         prompt=prompt(),
         greeting=(PROMPTS / "greeting.md").read_text(encoding=ENCODING),
+        quiet_minutes=_number(env, "VOICE_RELAY_QUIET_MINUTES", 15.0, 0.0, 240.0),
         narration_seconds=_number(env, "VOICE_RELAY_NARRATION_SECONDS", 30.0, 10.0, 300.0),
         speed=_number(env, "VOICE_RELAY_TTS_SPEED", 1.0, 0.7, 2.0),  # OpenAI accepts up to 4.0; 2.0 is our ceiling
     )

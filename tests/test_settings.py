@@ -62,3 +62,13 @@ def test_catchup_seconds(monkeypatch) -> None:
         )
         with pytest.raises(settings.SettingsError):
             settings.catchup_seconds()
+
+
+def test_quiet_minutes() -> None:
+    assert "VOICE_RELAY_QUIET_MINUTES" in settings.FIELDS
+    assert settings.load({}).quiet_minutes == 15
+    assert settings.load({"VOICE_RELAY_QUIET_MINUTES": "0"}).quiet_minutes == 0
+    for value in ("-1", "500"):
+        assert settings.problems({"VOICE_RELAY_QUIET_MINUTES": value}) == [
+            "VOICE_RELAY_QUIET_MINUTES: expected a number from 0.0 to 240.0, got one outside"
+        ]

@@ -84,13 +84,11 @@ async def test_with_two_sessions_a_task_needs_a_name_and_reaches_that_session_on
     assert (await bridge.sessions["shop"].next(0.01)) is None
 
 
-async def test_an_answer_drops_only_its_session_progress() -> None:
+async def test_an_answer_leaves_latest_progress_silent() -> None:
     bridge, worker = await voiced("shop", "api")
-    bridge.interval = 60
     bridge.progress(bridge.sessions["shop"], "runs make lint")
     bridge.progress(bridge.sessions["api"], "reads the log")
     assert await bridge.answer(bridge.sessions["shop"], "done")
-    bridge.interval, bridge._narrated = 0, 0.0
     await asyncio.sleep(0)
     (answer,) = worker.frames
     assert answer.run_llm and answer.messages[0]["content"].startswith(
@@ -102,10 +100,10 @@ async def test_an_answer_drops_only_its_session_progress() -> None:
         {"name": "api", "running": True, "waiting": False,
          "pending_lines": 0, "queued_updates": 0},
     ]
-    assert [line for _, line in bridge._progress] == ["reads the log"]
+    assert bridge._latest["api"][0] == "reads the log"
 
 
-async def test_progress_from_two_sessions_speaks_in_one_narration(
+async def test_progress_from_two_sessions_stays_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(bridge_module, "QUIET_SECONDS", 0)
@@ -113,11 +111,15 @@ async def test_progress_from_two_sessions_speaks_in_one_narration(
     bridge.progress(bridge.sessions["shop"], "runs make lint")
     bridge.progress(bridge.sessions["api"], "reads the log")
     await asyncio.sleep(0.01)
-    (frame,) = worker.frames
-    assert "shop: runs make lint\napi: reads the log" in frame.messages[0]["content"]
+    assert not worker.frames
+    assert {name: line for name, (line, _) in bridge._latest.items()} == {
+        "shop": "runs make lint", "api": "reads the log",
+    }
 
 
-async def test_progress_waits_for_the_reply_to_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_progress_stays_silent_after_the_reply_to_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(bridge_module, "QUIET_SECONDS", 0)
     monkeypatch.setattr(bridge_module, "REPLY_SECONDS", 0.05)
     bridge, worker = await voiced("shop", "api")
@@ -126,7 +128,8 @@ async def test_progress_waits_for_the_reply_to_an_answer(monkeypatch: pytest.Mon
     await asyncio.sleep(0.01)
     assert len(worker.frames) == 1
     await asyncio.sleep(0.1)
-    assert "api: reads the log" in worker.frames[1].messages[0]["content"]
+    assert len(worker.frames) == 1
+    assert bridge._latest["api"][0] == "reads the log"
 
 
 @pytest.mark.skipif(

@@ -109,6 +109,8 @@ Next times, `/voice-relay` opens the window, and it connects by itself.
 
 Next times, the voice window connects by itself and shows the linked sessions, what each one does, and the conversation. Tap the microphone to mute. The gear opens the three parts again. If the window does not open by itself, open http://127.0.0.1:7860/voice.
 
+Progress lines are never narrated. A task sent through `send_task` or an abort with new instructions gets one reminder after 15 minutes without an update, approval request or answer. Typed tasks and `open_session` tasks do not arm this reminder.
+
 The two chips below the status cycle speech speed (default 1.5×) and voice, saved per browser. The page reconnects automatically and gives one short catch-up of missed approvals, progress and answers from the last 10 minutes.
 
 ### Several sessions
@@ -178,7 +180,8 @@ The settings page lists the voices of the provider with samples and the OpenRout
 | Voice | `VOICE_RELAY_TTS_VOICE` | provider voice id | provider default |
 | Speaking style | `VOICE_RELAY_TTS_INSTRUCTIONS` | a short style sentence, e.g. `warm and quick`; OpenAI `gpt-4o-mini-tts` only | empty |
 | Speech speed | `VOICE_RELAY_TTS_SPEED` | `0.7` to `2.0` | `1.0` |
-| Progress interval | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
+| Quiet reminder (minutes) | `VOICE_RELAY_QUIET_MINUTES` | `0` (never) to `240` | `15` |
+| Deprecated, ignored | `VOICE_RELAY_NARRATION_SECONDS` | `10` to `300` | `30` |
 | Idle stop | `VOICE_RELAY_IDLE_SECONDS` | seconds ≥ `0`; `0` disables idle stop (restart required) | `600` |
 | Catch-up window | `VOICE_RELAY_CATCHUP_SECONDS` | seconds the server keeps missed updates for the next page | `28800` |
 | Projects folder | `VOICE_RELAY_PROJECTS` | a folder with your projects | none |

@@ -1,5 +1,5 @@
 """The voice side of the link: the tools the voice model calls, and the Claude Code news it
-hears. Progress waits for a quiet conversation and the narration interval."""
+hears. Progress stays silent; voice requests get one reminder if no news arrives."""
 
 from __future__ import annotations
 
@@ -22,7 +22,12 @@ from .sessions import ABORT, TASK, Session, Sessions, key
 DEVELOPER = "developer"
 ANSWER = "Claude Code in {name} finished its turn. Its final text:\n\n{answer}"
 STOPPED = "(The operator stopped this turn before it finished.)"  # the mod's ABORTED
-PROGRESS = "Claude Code progress since the last update:\n\n{progress}"
+FALLBACK = (
+    '{name} is still working on your request, "{task}", with no update yet. '
+    "Say that once in one short sentence, using the operator's own words for the task. "
+    "Do not say it again for this task."
+)
+FALLBACK_SECONDS = 30.0
 HISTORY = "Claude Code conversation so far in {name}:\n\n<conversation>\n{history}\n</conversation>"
 WAITING = "Claude Code in {name} waits at the screen for the operator to approve: {action}"
 TYPED = "The operator typed this to Claude Code in {name} directly:\n\n{text}"
@@ -126,6 +131,7 @@ class Bridge:
     """The linked sessions, and the one live voice worker that hears about them."""
 
     def __init__(self, *, interval: float) -> None:
+        # interval is accepted for older callers; progress is never narrated.
         self.sessions = Sessions()
         self._exchange: list[Line] = []
         self._fragment_at = 0.0
@@ -133,7 +139,7 @@ class Bridge:
         self._target: Session | None = None
         self._acted = False
         self._relay = False
-        self.interval = interval
+        self.quiet_seconds = 15.0 * 60
         self._catchup_seconds = settings.catchup_seconds()
         self._worker: PipelineWorker | None = None
         self._missed: deque[tuple[float, str, str, str, float]] = deque(maxlen=500)
@@ -145,10 +151,9 @@ class Bridge:
         self._updates: list[Update] = []
         self._speaker: asyncio.Task[None] | None = None
         self._update_seen: list[tuple[Update, str]] = []
-        self._progress: list[tuple[Session, str]] = []
-        self._narrated = 0.0
+        self._latest: dict[str, tuple[str, float]] = {}
         self._asked = 0.0
-        self._narration: asyncio.Task[None] | None = None
+        self._fallback: asyncio.Task[None] | None = None
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
@@ -209,6 +214,9 @@ class Bridge:
 
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
+        if self._fallback is not None:
+            self._fallback.cancel()
+        self._fallback = asyncio.create_task(self._remind())
         for session in self.sessions.all():
             session.want_history()
         tracker = worker.turn_tracking_observer
@@ -236,7 +244,9 @@ class Bridge:
         if self._worker is worker:
             self._worker = None
             self._quiet.set()
-            self._drop()
+            if self._fallback is not None:
+                self._fallback.cancel()
+                self._fallback = None
 
     def voice(self) -> bool:
         return self._worker is not None
@@ -311,17 +321,15 @@ class Bridge:
 
     def progress(self, session: Session, line: str) -> None:
         session.running, session.waiting = True, False
+        self._latest[session.name] = (line, time.time())
         if self._worker is None:
             self._remember("progress", session.name, line)
-            return
-        self._progress.append((session, line))
-        if self._narration is None or self._narration.done():
-            self._narration = asyncio.create_task(self._narrate())
 
     async def update(
         self, session: Session, kind: str, text: str,
         options: list[str] | None, subagent: bool,
     ) -> str:
+        session.asked_at = None
         now = time.monotonic()
         self._prune_missed()
         pending = {item[0] for item in self._missed if item[1].startswith("update-")}
@@ -394,7 +402,7 @@ class Bridge:
         stopped, restarting = session.stopping and text == STOPPED, session.restarting
         session.stopping = session.restarting = False
         session.running, session.waiting = stopped and restarting, False  # the next task waits
-        self._drop(session)
+        session.asked_at = None
         if stopped:  # the operator asked for it and heard it confirmed
             return True
         return await self._append(
@@ -403,7 +411,7 @@ class Bridge:
 
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
-        self._drop(session)
+        session.asked_at = None
         return await self._append(
             WAITING.format(name=session.name, action=action),
             missed=("waiting", session.name, action),
@@ -417,7 +425,10 @@ class Bridge:
         self._target, self._acted = found, True
         self._flush_exchange()
         busy, found.running = found.running, True
-        found.send(TASK, QUOTE.format(text=str(params.arguments.get("text", ""))))
+        found.asked_at = time.monotonic()
+        found.asked_text = str(params.arguments.get("text", ""))
+        found.reminded = False
+        found.send(TASK, QUOTE.format(text=found.asked_text))
         after = ", Claude Code starts it after the current turn" if busy else ""
         await params.result_callback(f"sent to {found.name}{after}")
 
@@ -432,6 +443,9 @@ class Bridge:
         found.send(ABORT)
         then = str(params.arguments.get("then") or "").strip()
         if then:
+            found.asked_at = time.monotonic()
+            found.asked_text = then
+            found.reminded = False
             found.running = found.restarting = True
             found.send(TASK, QUOTE.format(text=then))
         sent = ", and the new instructions after it" if then else ""
@@ -465,13 +479,26 @@ class Bridge:
         roots = [Path(projects).expanduser()] if projects else []
         return roots + [folder.parent for folder in self.sessions.folders()]
 
-    async def _narrate(self) -> None:
-        await asyncio.sleep(max(0.0, self._narrated + self.interval - time.monotonic()))
-        await self._wait_quiet()
-        lines, self._progress = self._progress, []
-        text = "\n".join(f"{session.name}: {line}" for session, line in lines)
-        if lines and await self._append(PROGRESS.format(progress=text)):
-            self._narrated = time.monotonic()
+    async def _remind(self) -> None:
+        while self._worker is not None:
+            await asyncio.sleep(FALLBACK_SECONDS)
+            if self.quiet_seconds <= 0:
+                continue
+            for session in self.sessions.all():
+                asked_at = session.asked_at
+                if (asked_at is None or session.reminded
+                        or time.monotonic() - asked_at < self.quiet_seconds):
+                    continue
+                await self._wait_quiet()
+                if (self._worker is None or self.quiet_seconds <= 0
+                        or session.asked_at != asked_at or session.reminded
+                        or time.monotonic() - asked_at < self.quiet_seconds
+                        or session not in self.sessions.all()):
+                    continue
+                if await self._append(FALLBACK.format(
+                    name=session.name, task=session.asked_text, minutes=self.quiet_seconds / 60
+                )):
+                    session.reminded = True
 
     async def _wait_quiet(self) -> None:
         # wait for a lasting pause, after the spoken reply to the last message began:
@@ -481,12 +508,6 @@ class Bridge:
             await asyncio.sleep(max(QUIET_SECONDS, self._asked + REPLY_SECONDS - time.monotonic()))
             if self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS:
                 break
-
-    def _drop(self, session: Session | None = None) -> None:
-        self._progress = [held for held in self._progress if session not in (None, held[0])]
-        if not self._progress and self._narration is not None:
-            self._narration.cancel()
-            self._narration = None
 
     def _notify(self, content: str) -> None:
         """Appends from sync code; the set holds each task until it ends."""

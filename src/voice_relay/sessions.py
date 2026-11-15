@@ -31,6 +31,9 @@ class Session:
     history_wanted: bool = False
     running: bool = False
     waiting: bool = False
+    asked_at: float | None = None
+    asked_text: str = ""
+    reminded: bool = False
     stopping: bool = False  # the operator stopped the turn by voice
     restarting: bool = False  # and gave what to do instead
 
