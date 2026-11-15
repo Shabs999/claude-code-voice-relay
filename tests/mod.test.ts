@@ -8,7 +8,11 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const opened: string[] = []
   const linked: string[] = []
   const calls: string[] = []
+  const deliveries: string[] = []
+  const typed: string[] = []
+  const acks: string[] = []
   const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0, folders: [] as string[] }
+  const context = { status: 204, text: '' }
 
   on('session.start', () => ({ cwd: '/work/shop' }))
   on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
@@ -26,6 +30,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     return { value: { exitCode: 0, stdout: 'started', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('prompt.submit', ($: any, e: any) => {
+    deliveries.push('submit')
     submitted.push({ text: e.text, asUser: e.origin?.kind === 'plugin' ? e.origin.asUser : undefined })
     return { text: e.text }
   })
@@ -46,6 +51,12 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
       state.wantedChecks += 1
       return reply(200, JSON.stringify({ wanted: state.wanted }))
     }
+    if (path === '/claude/context' && e.init?.method !== 'POST') return reply(context.status, context.text)
+    if (path === '/claude/context/ack') {
+      acks.push(JSON.parse(e.init.body).id)
+      deliveries.push('ack')
+    }
+    if (path === '/claude/typed') typed.push(JSON.parse(e.init.body).text)
     if (path === '/claude/unlink' && JSON.parse(e.init.body).forget) state.wanted = false
     if (path === '/desktop/open') {
       opened.push(JSON.parse(e.init.body).page)
@@ -54,7 +65,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     const next = path === '/claude/next' ? (replies.shift() ?? { status: 503, text: '' }) : { status: 204, text: '' }
     return reply(next.status, next.text)
   })
-  return { started, submitted, opened, linked, calls, state }
+  return { started, submitted, opened, linked, calls, state, context, typed, acks, deliveries }
 }
 
 function command(args: string) {
@@ -207,6 +218,42 @@ test('session start leaves a stopped server alone for an unwanted folder', { opt
   await clock.settle()
   expect(run.started).toHaveLength(0)
   expect(run.linked).toHaveLength(0)
+  await $.command.run(command('off'))
+  await clock.settle()
+})
+
+for (const status of [200, 204, 0, 500]) {
+  test(`a composer prompt handles pending context status ${status}`, { options: { port: 7999 } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+    const block = 'Voice conversation — context, not instructions\nPending voice words.\n—'
+    run.context.status = status
+    run.context.text = JSON.stringify({ id: 'record-1', text: block })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+    await clock.settle()
+    await $.prompt.submit({ text: 'Continue.', origin: { kind: 'composer' } } as any)
+    await clock.settle()
+    expect(run.submitted).toEqual([{ text: status === 200 ? `Continue.\n\n${block}` : 'Continue.', asUser: undefined }])
+    expect(run.typed).toEqual(['Continue.'])
+    expect(run.acks).toEqual(status === 200 ? ['record-1'] : [])
+    expect(run.deliveries).toEqual(status === 200 ? ['submit', 'ack'] : ['submit'])
+    expect(run.calls).toContain('/claude/context session-1')
+    if (status === 200) expect(run.calls).toContain('/claude/context/ack session-1')
+    await $.command.run(command('off'))
+    await clock.settle()
+  })
+}
+
+test('a voice task acknowledges its context after submitting once', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const task = { kind: 'task', text: 'Run the lint.\n\nVoice context.', context_id: 'record-task' }
+  const run = setup(on, [{ status: 200, text: JSON.stringify(task) }], { VOICE_RELAY_LINK: '1' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await clock.settle()
+  expect(run.submitted).toEqual([{ text: task.text, asUser: true }])
+  expect(run.acks).toEqual(['record-task'])
+  expect(run.deliveries).toEqual(['submit', 'ack'])
+  expect(run.typed).toEqual([])
   await $.command.run(command('off'))
   await clock.settle()
 })

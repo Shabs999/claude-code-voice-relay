@@ -13,7 +13,7 @@ const STOPPED =
 const ABORTED = '(The operator stopped this turn before it finished.)'
 const UV = 'https://docs.astral.sh/uv/getting-started/installation/'
 
-type Command = { kind: 'task' | 'abort' | 'context'; text: string }
+type Command = { kind: 'task' | 'abort' | 'context'; text: string; context_id?: string }
 type Reply = { status: number; text: string }
 type Link = {
   on: boolean
@@ -73,7 +73,23 @@ export const register: Register = (on, options) => {
     if (!link.on) await relink($, link, options)
     const stopped = link.stopped === true
     link.stopped = false
-    const submitted = await next(stopped ? { ...e, context: [...(e.context ?? []), STOPPED] } : e)
+    const composer = link.on && e.origin?.kind === 'composer' && e.text.trim() !== ''
+    let pending: { id: string; text: string } | undefined
+    if (composer) {
+      const reply = await Promise.race([
+        call($, link, '/claude/context'),
+        pause($, 1000).then(() => ({ status: 0, text: '' })),
+      ])
+      if (reply.status === 200) {
+        try {
+          const block = JSON.parse(reply.text)
+          if (typeof block.id === 'string' && typeof block.text === 'string') pending = block
+        } catch { /* Submit unchanged when the record is malformed. */ }
+      }
+    }
+    const prompt = pending ? { ...e, text: `${e.text}\n\n${pending.text}` } : e
+    const submitted = await next(stopped ? { ...prompt, context: [...(e.context ?? []), STOPPED] } : prompt)
+    if (pending) await call($, link, '/claude/context/ack', { id: pending.id })
     if (link.on && e.origin?.kind === 'composer' && e.text.trim() !== '') {
       void call($, link, '/claude/typed', { text: e.text })
     }
@@ -215,7 +231,9 @@ async function poll($: EngineInterface, link: Link) {
 
 async function run($: EngineInterface, command: Command, link: Link): Promise<void> {
   if (command.kind === 'task') {
-    void $.prompt.submit({ text: command.text, asUser: true }).catch(() => $.ui.status('a voice task failed'))
+    void $.prompt.submit({ text: command.text, asUser: true }).then(async () => {
+      if (command.context_id) await call($, link, '/claude/context/ack', { id: command.context_id })
+    }).catch(() => $.ui.status('a voice task failed'))
   } else if (command.kind === 'context') {
     await call($, link, '/claude/context', { history: await history($) })
   } else if (link.running !== undefined) {
