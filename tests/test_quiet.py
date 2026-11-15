@@ -48,6 +48,7 @@ async def test_voice_task_gets_one_reminder_and_next_task_rearms(fast_reminder):
     bridge.quiet_seconds = 0.01
     try:
         for task in ("check my checkout", "fix only the lint"):
+            bridge.operator_said(task)
             if task == "check my checkout":
                 await bridge._send_task(Call(text=task))
             else:
@@ -104,6 +105,7 @@ async def test_news_during_quiet_wait_cancels_reminder(fast_reminder, monkeypatc
 
     monkeypatch.setattr(bridge, "_wait_quiet", quiet)
     try:
+        bridge.operator_said("run the tests")
         await bridge._send_task(Call(text="run the tests"))
         await asyncio.wait_for(entered.wait(), 1)
         await bridge.answer(bridge.sessions["shop"], "done")

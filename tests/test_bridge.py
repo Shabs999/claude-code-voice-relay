@@ -52,16 +52,17 @@ async def voiced(*names: str) -> tuple[Bridge, Worker]:
 
 async def test_a_task_goes_to_the_only_session_without_a_name() -> None:
     bridge = Bridge(interval=0)
+    bridge.operator_said("run the lint")
     call = Call(text="run the lint")
     await bridge._send_task(call)  # type: ignore[arg-type]
     assert call.result.startswith("not sent: no Claude Code session")
 
     bridge, _ = await voiced("shop")
+    bridge.operator_said("run the lint")
     await bridge._send_task(call)  # type: ignore[arg-type]
-    assert (await bridge.sessions["shop"].next(1)) == {
-        "kind": TASK,
-        "text": QUOTE.format(text="run the lint"),
-    }
+    command = await bridge.sessions["shop"].next(1)
+    assert command["kind"] == TASK
+    assert command["text"].startswith(QUOTE.format(text="run the lint"))
     await bridge._abort(Call(then="fix only the lint"))  # type: ignore[arg-type]
     assert (await bridge.sessions["shop"].next(1)) == {"kind": ABORT, "text": ""}
     assert (await bridge.sessions["shop"].next(1)) == {
@@ -74,6 +75,7 @@ async def test_a_task_goes_to_the_only_session_without_a_name() -> None:
 
 async def test_with_two_sessions_a_task_needs_a_name_and_reaches_that_session_only() -> None:
     bridge, _ = await voiced("shop", "voice-relay")
+    bridge.operator_said("run the tests")
     unnamed, unknown = Call(text="run the tests"), Call(text="run the tests", session="billing")
     await bridge._send_task(unnamed)  # type: ignore[arg-type]
     await bridge._send_task(unknown)  # type: ignore[arg-type]
@@ -147,6 +149,7 @@ async def test_open_session_opens_the_spoken_folder_and_its_link_gets_the_task(
     bridge, _ = await voiced()
     await bridge.link("shop", "shop", str(tmp_path / "shop"))
 
+    bridge.operator_said("open Voice Relay and run the tests")
     several = Call(folder="voice")
     await bridge._open_session(several)  # type: ignore[arg-type]
     assert "voice-notes, voice-relay" in several.result
@@ -155,10 +158,9 @@ async def test_open_session_opens_the_spoken_folder_and_its_link_gets_the_task(
 
     await bridge.link("new", "voice-relay", str(tmp_path / "voice-relay"))
     assert (await bridge.sessions["new"].next(1)) == {"kind": CONTEXT, "text": ""}
-    assert (await bridge.sessions["new"].next(1)) == {
-        "kind": TASK,
-        "text": QUOTE.format(text="run the tests"),
-    }
+    command = await bridge.sessions["new"].next(1)
+    assert command["kind"] == TASK
+    assert command["text"].startswith(QUOTE.format(text="run the tests"))
 
 
 async def test_routes_refuse_other_websites_a_wrong_token_and_an_unknown_session() -> None:
@@ -403,3 +405,69 @@ async def test_stopped_answer_appends_nothing() -> None:
     assert await bridge.answer(session, STOPPED)
     assert not worker.frames
     assert not bridge._missed
+
+
+@pytest.mark.parametrize("age", [None, 10, 90, 90.001, 120])
+@pytest.mark.parametrize("tool", ["send", "abort", "open", "open-only"])
+async def test_task_speech_guard(age, tool, monkeypatch):
+    from unittest.mock import Mock
+
+    from loguru import logger
+
+    clock = [1000.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    bridge = Bridge(interval=0)
+    session, _ = bridge.sessions.link("shop", "shop", "")
+    send = Mock()
+    monkeypatch.setattr(session, "send", send)
+    choose = Mock(return_value="no matching project")
+    monkeypatch.setattr(terminal, "choose", choose)
+    if age is not None:
+        bridge.operator_said("run the tests")
+        clock[0] += age
+    text = "run the tests " * 10
+    call = Call(text=text, then=text, folder="shop", task=text if tool == "open" else "")
+    warnings = []
+    sink = logger.add(lambda message: warnings.append(message.record), level="WARNING")
+    try:
+        handler = {"send": bridge._send_task, "abort": bridge._abort,
+                   "open": bridge._open_session, "open-only": bridge._open_session}[tool]
+        await handler(call)
+    finally:
+        logger.remove(sink)
+    recent = age is not None and age <= 90
+    if not recent:
+        prefix = "not stopped" if tool == "abort" else "not sent"
+        assert call.result == (
+            f"{prefix}: the operator has not asked for this in the last 90 seconds; "
+            "say nothing to the operator and wait for their words"
+        )
+        send.assert_not_called()
+        choose.assert_not_called()
+        assert session.asked_at is None
+        assert bridge._target is None and not bridge._acted
+        assert not session.stopping and not session.running
+        logged = "shop" if tool == "open-only" else text.strip() if tool != "send" else text
+        assert len(warnings) == 1
+        assert warnings[0]["level"].name == "WARNING"
+        assert warnings[0]["message"] == (
+            f"task refused: no operator speech in the last 90 s (text: {logged[:80]})"
+        )
+    elif tool in {"send", "abort"}:
+        assert call.result.startswith("sent to" if tool == "send" else "abort sent")
+        assert session.asked_at == clock[0]
+        assert send.call_count == (1 if tool == "send" else 2)
+        if tool == "abort":
+            assert send.call_args_list[0].args == (ABORT,)
+        assert send.call_args.args == (TASK, QUOTE.format(text=text if tool == "send"
+                                                        else text.strip()))
+    else:
+        choose.assert_called_once()
+        assert call.result == "not opened: no matching project"
+
+
+async def test_empty_speech_does_not_authorize_task():
+    bridge = Bridge(interval=0)
+    bridge.operator_said("   ")
+    assert bridge._spoke_at is None
+    assert not bridge._operator_spoke_recently()

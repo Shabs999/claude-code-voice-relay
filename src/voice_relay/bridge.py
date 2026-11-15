@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.frames.frames import LLMMessagesAppendFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
@@ -34,6 +35,11 @@ FALLBACK = (
     '{name} is still working on your request, "{task}", with no update yet. '
     "Say that once in one short sentence, using the operator's own words for the task. "
     "Do not say it again for this task."
+)
+SPEECH_SECONDS = 90.0
+SPEECH_REFUSAL = (
+    "the operator has not asked for this in the last 90 seconds; "
+    "say nothing to the operator and wait for their words"
 )
 FALLBACK_SECONDS = 30.0
 HISTORY = "Claude Code conversation so far in {name}:\n\n<conversation>\n{history}\n</conversation>"
@@ -184,6 +190,7 @@ class Bridge:
         self.sessions = Sessions()
         self._exchange: list[Line] = []
         self._fragment_at = 0.0
+        self._spoke_at: float | None = None
         self._join = False
         self._target: Session | None = None
         self._acted = False
@@ -295,12 +302,17 @@ class Bridge:
     def operator_said(self, text: str) -> None:
         if not text.strip():
             return
+        self._spoke_at = time.monotonic()
         now = time.time()
         if self._join and self._exchange and now - self._fragment_at < 20:
             self._exchange[-1].text += " " + text
         else:
             self._exchange.append(Line(now, "Shahab", text))
         self._fragment_at, self._join, self._relay = now, True, False
+
+    def _operator_spoke_recently(self) -> bool:
+        return (self._spoke_at is not None
+                and time.monotonic() - self._spoke_at <= SPEECH_SECONDS)
 
     def tool_called(self) -> None:
         self._join = False
@@ -578,6 +590,11 @@ class Bridge:
         )
 
     async def _send_task(self, params: FunctionCallParams) -> None:
+        if not self._operator_spoke_recently():
+            logger.warning("task refused: no operator speech in the last 90 s (text: {})",
+                           str(params.arguments.get("text", ""))[:80])
+            await params.result_callback(f"not sent: {SPEECH_REFUSAL}")
+            return
         found = self.sessions.find(str(params.arguments.get("session") or ""))
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
@@ -593,6 +610,12 @@ class Bridge:
         await params.result_callback(f"sent to {found.name}{after}")
 
     async def _abort(self, params: FunctionCallParams) -> None:
+        then = str(params.arguments.get("then") or "").strip()
+        if then and not self._operator_spoke_recently():
+            logger.warning("task refused: no operator speech in the last 90 s (text: {})",
+                           then[:80])
+            await params.result_callback(f"not stopped: {SPEECH_REFUSAL}")
+            return
         found = self.sessions.find(str(params.arguments.get("session") or ""))
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
@@ -601,7 +624,6 @@ class Bridge:
         self._flush_exchange()
         found.stopping = True
         found.send(ABORT)
-        then = str(params.arguments.get("then") or "").strip()
         if then:
             found.asked_at = time.monotonic()
             found.asked_text = then
@@ -614,6 +636,11 @@ class Bridge:
     async def _open_session(self, params: FunctionCallParams) -> None:
         name = str(params.arguments.get("folder") or "")
         task = str(params.arguments.get("task") or "").strip()
+        if not self._operator_spoke_recently():
+            logger.warning("task refused: no operator speech in the last 90 s (text: {})",
+                           (task or name)[:80])
+            await params.result_callback(f"not sent: {SPEECH_REFUSAL}")
+            return
         resume = params.arguments.get("resume") is True
         folder = terminal.choose(name, self._roots())
         if isinstance(folder, str):
