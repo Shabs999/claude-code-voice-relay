@@ -224,3 +224,67 @@ async def test_offline_replacement_preserves_decisions(
         "current", "helper question (a helper inside that session)",
         "helper current (a helper inside that session)",
     ]
+
+
+async def test_answers_replace_stale_catchup(bridge: Bridge) -> None:
+    session = bridge.sessions["shop"]
+    bridge.progress(session, "old progress")
+    await bridge.waiting(session, "old approval")
+    await bridge.update(session, "milestone", "old milestone", None, False)
+    await bridge.update(session, "done", "old done", None, False)
+    await bridge.update(session, "needs-you", "keep question", None, False)
+    for text in ("first answer", "second answer", "last answer"):
+        assert not await bridge.answer(session, text)
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge.replay()
+    message = content(worker)
+    assert "last answer" in message and "keep question" in message
+    for stale in ("old progress", "old approval", "old milestone", "old done",
+                  "first answer", "second answer"):
+        assert stale not in message
+
+
+async def test_missed_answers_keep_session_order(bridge: Bridge) -> None:
+    await bridge.answer(bridge.sessions["shop"], "shop answer")
+    await bridge.answer(bridge.sessions["api"], "api answer")
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge.replay()
+    message = content(worker)
+    assert message.index("shop answer") < message.index("api answer")
+
+
+async def test_live_answer_supersedes_unspoken_updates(bridge: Bridge) -> None:
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    bridge._quiet.clear()
+    session = bridge.sessions["shop"]
+    session.asked_at = 1
+    for kind, text in (("done", "old done"), ("milestone", "old milestone"),
+                       ("needs-you", "keep question")):
+        await bridge.update(session, kind, text, None, False)
+    session.asked_at = 1
+    assert await bridge.answer(session, "finished answer")
+    assert session.asked_at is None
+    assert [item.kind for item in bridge._updates] == ["needs-you"]
+    assert "finished answer" in content(worker)
+    bridge._quiet.set()
+    await bridge._speaker
+    assert len(worker.frames) == 2
+    message = worker.frames[1].messages[0]["content"]
+    assert "keep question" in message
+    assert "old done" not in message and "old milestone" not in message
+
+
+@pytest.mark.parametrize("kind", ["progress", "answer", "waiting",
+                                 "update-milestone", "update-done"])
+def test_remember_latest_per_kind_and_session(bridge: Bridge, kind: str) -> None:
+    bridge._remember(kind, "shop", "old")
+    bridge._remember(kind, "api", "other session")
+    bridge._remember("update-needs-you", "shop", "first question")
+    bridge._remember("update-needs-you", "shop", "second question")
+    bridge._remember(kind, "shop", "new")
+    assert [item[3] for item in bridge._missed] == [
+        "other session", "first question", "second question", "new",
+    ]

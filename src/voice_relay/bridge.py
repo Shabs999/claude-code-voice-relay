@@ -544,6 +544,16 @@ class Bridge:
         session.asked_at = None
         if stopped:  # the operator asked for it and heard it confirmed
             return True
+        self._missed = deque(
+            (item for item in self._missed if not (
+                item[2] == session.name
+                and item[1] in {"progress", "waiting", "update-milestone", "update-done"}
+            )), maxlen=500,
+        )
+        self._updates = [
+            item for item in self._updates
+            if not (item.session is session and item.kind in {"milestone", "done"})
+        ]
         spoken, detail = split_answer(text)
         content = (
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
@@ -682,7 +692,7 @@ class Bridge:
         previous = next((item for item in reversed(self._missed) if item[2] == name), None)
         if previous is not None and previous[3] == text:
             return
-        if kind == "progress":
+        if kind in {"progress", "answer", "waiting", "update-milestone", "update-done"}:
             self._missed = deque(
                 (item for item in self._missed if item[1:3] != (kind, name)), maxlen=500
             )

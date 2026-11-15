@@ -250,7 +250,7 @@ async def test_missed_updates_have_count_and_replay_age_limits(
     bridge = Bridge(interval=0)
     await bridge.link("shop", "shop", "")
     for i in range(501):
-        await bridge.answer(bridge.sessions["shop"], str(i))
+        bridge._remember("update-needs-you", "shop", str(i))
     assert len(bridge._missed) == 500
     assert bridge._missed[0][3] == "1"
     clock[0] += 28860

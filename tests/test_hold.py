@@ -56,9 +56,10 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
     assert not bridge.held()
     assert len(worker.frames) == 1
     text = worker.frames[0].messages[0]["content"]
-    words = ["approve command", "choose branch", "building", "build completed", "brief answer"]
+    words = ["choose branch", "brief answer"]
     assert [text.index(word) for word in words] == sorted(text.index(word) for word in words)
     assert all(text.count(word) == 1 for word in words)
+    assert all(word not in text for word in ("approve command", "building", "build completed"))
     assert "private detail" not in text
     assert not await bridge.release()
     await bridge.replay()
