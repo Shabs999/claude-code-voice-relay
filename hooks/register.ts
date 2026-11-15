@@ -20,6 +20,8 @@ type Link = {
   polling: boolean
   base: string
   attempt: number // a newer /voice-relay or off ends an older connect
+  lastAttempt?: number
+  disabled?: boolean
   name?: string
   headers?: Record<string, string>
   running?: string
@@ -36,23 +38,25 @@ export const register: Register = (on, options) => {
       description: 'Talk to this session by voice. /voice-relay settings, off, quit.',
       argumentHint: '[settings|off|quit]',
     })
-    if ((await $.env.get('VOICE_RELAY_LINK')) === '1') void connect($, link, options)
+    if (!link.on) await relink($, link, options)
     return started
   })
 
   on('command.run', { command: 'voice-relay' }, async ($, e) => {
     const args = e.args.trim()
     if (args === 'off' || args === 'quit') {
+      link.disabled = true
       link.attempt += 1
       link.on = false
       $.ui.status(undefined)
-      void call($, link, args === 'quit' ? '/desktop/quit' : '/claude/unlink', {})
+      await call($, link, args === 'quit' ? '/desktop/quit' : '/claude/unlink', { forget: true, cwd: await $.session.cwd() })
       return { text: args === 'quit' ? 'The voice server stops for all sessions.' : 'Voice link off in this session.' }
     }
     if (args === 'settings') {
       void settings($, link, options)
       return { text: `Settings open at ${link.base}/settings.` }
     }
+    link.disabled = false
     void connect($, link, options)
     return { text: `Voice link starting. The voice window opens at ${link.base}/voice.` }
   }).catch(() => ({ text: 'The voice link did not start. Run /voice-relay again.' }))
@@ -60,16 +64,17 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     if (link.on) await call($, link, '/claude/unlink', {})
     // after /clear the process goes on under a new session id: nothing of this link holds
-    Object.assign(link, { on: false, attempt: link.attempt + 1, name: undefined, headers: undefined, running: undefined, stopped: false })
+    Object.assign(link, { on: false, attempt: link.attempt + 1, name: undefined, headers: undefined, running: undefined, stopped: false, lastAttempt: undefined })
     $.ui.status(undefined)
     return next(e)
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
+    if (!link.on) await relink($, link, options)
     const stopped = link.stopped === true
     link.stopped = false
     const submitted = await next(stopped ? { ...e, context: [...(e.context ?? []), STOPPED] } : e)
-    if (link.on && e.origin.kind === 'composer' && e.text.trim() !== '') {
+    if (link.on && e.origin?.kind === 'composer' && e.text.trim() !== '') {
       void call($, link, '/claude/typed', { text: e.text })
     }
     return submitted
@@ -106,11 +111,25 @@ export const register: Register = (on, options) => {
   })
 }
 
+async function wanted($: EngineInterface, link: Link): Promise<boolean> {
+  const reply = await call($, link, `/claude/wanted?cwd=${encodeURIComponent(await $.session.cwd())}`)
+  if (reply.status !== 200) return false
+  try { return JSON.parse(reply.text).wanted === true } catch { return false }
+}
+
+async function relink($: EngineInterface, link: Link, options: PluginOptions): Promise<void> {
+  const now = Date.now()
+  if (link.disabled || (link.lastAttempt !== undefined && now - link.lastAttempt < 30_000)) return
+  link.lastAttempt = now
+  if (!(await up($, link))) return
+  if ((await $.env.get('VOICE_RELAY_LINK')) === '1' || await wanted($, link)) await connect($, link, options, true)
+}
+
 /** Links the session and opens the voice window, which asks for any missing key itself. */
-async function connect($: EngineInterface, link: Link, options: PluginOptions): Promise<void> {
+async function connect($: EngineInterface, link: Link, options: PluginOptions, automatic = false): Promise<void> {
   const attempt = ++link.attempt
   link.on = false
-  if (!(await ready($, link, options)) || link.attempt !== attempt || !(await linkSession($, link))) return
+  if (!(await (automatic ? up($, link) : ready($, link, options))) || link.attempt !== attempt || !(await linkSession($, link))) return
   link.on = true
   if (!link.polling) void poll($, link)
   await call($, link, '/desktop/open', { page: 'client' })
@@ -199,7 +218,7 @@ async function up($: EngineInterface, link: Link): Promise<boolean> {
 }
 
 /** One bridge call: a POST with a body, else a GET. Status 0 means no answer. */
-async function call($: EngineInterface, link: Link, path: string, body?: Record<string, string>): Promise<Reply> {
+async function call($: EngineInterface, link: Link, path: string, body?: Record<string, string | boolean>): Promise<Reply> {
   link.headers ??= await headers($)
   if (link.headers === undefined) return { status: 0, text: '' }
   const init = body === undefined ? { headers: link.headers } : { method: 'POST', headers: link.headers, body: JSON.stringify(body) }

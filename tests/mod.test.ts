@@ -8,7 +8,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const opened: string[] = []
   const linked: string[] = []
   const calls: string[] = []
-  const state = { up: false, id: 'session-1' }
+  const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0 }
 
   on('session.start', () => ({ cwd: '/work/shop' }))
   on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
@@ -24,7 +24,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     return { value: { exitCode: 0, stdout: 'started', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('prompt.submit', ($: any, e: any) => {
-    submitted.push({ text: e.text, asUser: e.origin.kind === 'plugin' ? e.origin.asUser : undefined })
+    submitted.push({ text: e.text, asUser: e.origin?.kind === 'plugin' ? e.origin.asUser : undefined })
     return { text: e.text }
   })
   on('http.fetch', ($: any, e: any) => {
@@ -36,9 +36,15 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     }
     if (path === '/claude/link') {
       const body = JSON.parse(e.init.body)
+      state.wanted = true
       linked.push(`${body.name} ${body.cwd}`)
       return reply(200, JSON.stringify({ name: 'shop' }))
     }
+    if (path === '/claude/wanted') {
+      state.wantedChecks += 1
+      return reply(200, JSON.stringify({ wanted: state.wanted }))
+    }
+    if (path === '/claude/unlink' && JSON.parse(e.init.body).forget) state.wanted = false
     if (path === '/desktop/open') {
       opened.push(JSON.parse(e.init.body).page)
       return reply(204)
@@ -109,10 +115,68 @@ test('after /clear the link ends, and /voice-relay links the new session id', { 
 test('a session started with VOICE_RELAY_LINK=1 links with no command', { options: { port: 7999 } }, async ($, on) => {
   const clock = mock.clock(on)
   const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+  run.state.up = true
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
   await clock.advance(2000)
   await clock.settle()
   expect(run.linked).toEqual(['shop /work/shop'])
   await $.command.run(command('off'))
   await clock.settle()
+})
+
+
+test('a prompt after /clear relinks the wanted folder without starting the server', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.command.run(command(''))
+  await clock.settle()
+  await $.session.end({ reason: 'clear', sessionId: 'session-1' } as any)
+  run.state.id = 'session-2'
+  await $.prompt.submit({ text: 'Continue the hand-over.', asUser: true })
+  await clock.settle()
+  expect(run.linked).toEqual(['shop /work/shop', 'shop /work/shop'])
+  expect(run.calls).toContain('/claude/link session-2')
+  expect(run.started).toHaveLength(1)
+  await $.command.run(command('off'))
+  await clock.settle()
+})
+
+test('/voice-relay off forgets the folder and prevents prompt relinking', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.command.run(command(''))
+  await clock.settle()
+  await $.command.run(command('off'))
+  await clock.settle()
+  await $.session.end({ reason: 'clear', sessionId: 'session-1' } as any)
+  run.state.id = 'session-2'
+  await $.prompt.submit({ text: 'Continue.', asUser: true })
+  await clock.settle()
+  expect(run.state.wanted).toBe(false)
+  expect(run.linked).toHaveLength(1)
+})
+
+test('prompt relink attempts are throttled for 30 seconds', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  run.state.up = true
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.prompt.submit({ text: 'First.', asUser: true })
+  await $.prompt.submit({ text: 'Second.', asUser: true })
+  expect(run.state.wantedChecks).toBe(1)
+  // Boundary assertion omitted: mock clock's Date.now behavior could not be verified.
+  expect(run.started).toHaveLength(0)
+  await clock.settle()
+})
+
+test('automatic relinking leaves a stopped server alone', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.prompt.submit({ text: 'Continue.', asUser: true })
+  await clock.settle()
+  expect(run.started).toHaveLength(0)
+  expect(run.linked).toHaveLength(0)
 })

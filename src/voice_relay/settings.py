@@ -310,3 +310,32 @@ def _body(env: Mapping[str, str]) -> str:
             f"VOICE_RELAY_LLM_BODY: expected a JSON object, got {type(body).__name__}"
         )
     return text
+
+
+def wanted_folders() -> set[str]:
+    """Folders kept across restarts; a damaged file starts empty."""
+    try:
+        folders = json.loads((CONFIG_DIR / "linked.json").read_text(encoding=ENCODING))
+        if isinstance(folders, list) and all(isinstance(f, str) for f in folders):
+            return set(folders)
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def remember_folder(folder: str, *, forget: bool = False) -> None:
+    if not folder:
+        return
+    folders = wanted_folders()
+    resolved = str(Path(folder).resolve())
+    if forget:
+        folders.discard(resolved)
+    else:
+        folders.add(resolved)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = CONFIG_DIR / f"linked-{secrets.token_hex(8)}.tmp"
+    try:
+        temporary.write_text(json.dumps(sorted(folders)) + "\n", encoding=ENCODING)
+        temporary.replace(CONFIG_DIR / "linked.json")
+    finally:
+        temporary.unlink(missing_ok=True)

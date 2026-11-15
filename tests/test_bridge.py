@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,9 @@ async def test_progress_waits_for_the_reply_to_an_answer(monkeypatch: pytest.Mon
     assert "api: reads the log" in worker.frames[1].messages[0]["content"]
 
 
+@pytest.mark.skipif(
+    os.environ.get("VOICE_RELAY_HEADLESS") == "1", reason="opens a terminal in desktop environments"
+)
 async def test_open_session_opens_the_spoken_folder_and_its_link_gets_the_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,11 +223,20 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     frame = worker.frames[1]
     assert frame.run_llm and frame.messages[0]["role"] == "developer"
     text = frame.messages[0]["content"]
-    assert text.index("shop: approve command") < text.index("shop: still working") < text.index("shop: finished")
+    assert (
+        text.index("shop: approve command")
+        < text.index("shop: still working")
+        < text.index("shop: finished")
+    )
+    assert bridge._missed
+    clock[0] += 10
+    bridge.detach(worker)  # type: ignore[arg-type]
     assert not bridge._missed
 
 
-async def test_missed_updates_have_count_and_replay_age_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missed_updates_have_count_and_replay_age_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     clock = [1000.0]
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
     bridge = Bridge(interval=0)
@@ -237,3 +250,98 @@ async def test_missed_updates_have_count_and_replay_age_limits(monkeypatch: pyte
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
     assert not worker.frames and not bridge._missed
+
+
+@pytest.mark.parametrize("seconds, retained", [(1, True), (10, False)])
+async def test_replay_retained_until_client_survives(
+    seconds: int, retained: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    bridge = Bridge(interval=0)
+    bridge._remember("waiting", "shop", "approve command")
+    worker = Worker()
+    bridge.attach(worker)
+    await bridge.replay()
+    clock[0] += seconds
+    bridge.detach(worker)
+    assert bool(bridge._missed) is retained
+    second = Worker()
+    bridge.attach(second)
+    await bridge.replay()
+    assert bool(second.frames) is retained
+    if retained:
+        assert second.frames[0].messages == worker.frames[0].messages
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_unlink_announces_once(
+    connected: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge_module, "DROP_SECONDS", 0)
+    bridge = Bridge(interval=0)
+    assert bridge.linked_line() == "Claude Code sessions linked now: none."
+    await bridge.link("old", "shop", "/work/shop")
+    worker = Worker()
+    if connected:
+        bridge.attach(worker)
+    await bridge.unlink("old")
+    await asyncio.gather(*bridge._drops.values())
+    await bridge.unlink("old")
+    assert "The last one was shop, which dropped off at" in bridge.linked_line()
+    if connected:
+        assert len(worker.frames) == 1
+        assert worker.frames[0].run_llm
+        assert "The shop session dropped" in worker.frames[0].messages[0]["content"]
+    else:
+        assert len(bridge._missed) == 1
+        assert bridge._missed[0][1] == "waiting"
+        assert "the shop session dropped" in bridge._missed[0][3]
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_handover_cancels_drop(connected: bool) -> None:
+    bridge = Bridge(interval=0)
+    await bridge.link("old", "shop", "/work/shop")
+    worker = Worker()
+    if connected:
+        bridge.attach(worker)
+    await bridge.unlink("old")
+    pending = list(bridge._drops.values())
+    await asyncio.sleep(0)
+    await bridge.link("new", "shop", "/work/shop/.")
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert not bridge._missed
+    assert all(not frame.run_llm for frame in worker.frames)
+
+
+async def test_wanted_routes_persist_and_forget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from voice_relay import settings
+
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    assert settings.wanted_folders() == set()
+    (tmp_path / "linked.json").write_text("broken")
+    assert settings.wanted_folders() == set()
+    (tmp_path / "linked.json").write_text('{"wrong": "shape"}')
+    assert settings.wanted_folders() == set()
+    app = FastAPI()
+    bridge = Bridge(interval=0)
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token=TOKEN, port=7860, poll=0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+        folder = str(tmp_path / "shop")
+        assert (await client.get("/claude/wanted", params={"cwd": folder})).status_code == 401
+        body = {"name": "shop", "cwd": folder + "/."}
+        assert (await client.post("/claude/link", headers=HEADERS, json=body)).status_code == 200
+        assert settings.wanted_folders() == {folder}
+        await client.post("/claude/unlink", headers=HEADERS)
+        response = await client.get("/claude/wanted", headers=HEADERS, params={"cwd": folder})
+        assert response.json() == {"wanted": True}
+        await client.post("/claude/link", headers=HEADERS, json=body)
+        await client.post("/claude/unlink", headers=HEADERS, json={"forget": True})
+        assert settings.wanted_folders() == set()
+        response = await client.get("/claude/wanted", headers=HEADERS, params={"cwd": folder})
+        assert response.json() == {"wanted": False}
+        for task in list(bridge._drops.values()):
+            task.cancel()

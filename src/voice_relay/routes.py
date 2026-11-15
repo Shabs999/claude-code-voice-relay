@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -23,7 +24,10 @@ PAGES = {"client": "/voice", "settings": "/settings"}
 REOPEN_SECONDS = 60.0
 
 
-VOICES = ("alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse")
+VOICES = (
+    "alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage",
+    "shimmer", "verse",
+)
 
 
 @dataclass
@@ -93,13 +97,27 @@ def mount(
         authorize(request)
         body = await _body(request)
         name = await bridge.link(_session_id(request), _text(body, "name"), _text(body, "cwd", ""))
+        settings.remember_folder(_text(body, "cwd", ""))
         return JSONResponse({"name": name})
 
     @app.post("/claude/unlink")
     async def unlink(request: Request) -> Response:
         authorize(request)
-        await bridge.unlink(_session_id(request))
+        body = await _body(request)
+        session_id = _session_id(request)
+        if body.get("forget") is True:
+            folder = (
+                bridge.sessions[session_id].folder
+                if session_id in bridge.sessions else _text(body, "cwd", "")
+            )
+            settings.remember_folder(folder, forget=True)
+        await bridge.unlink(session_id)
         return Response(status_code=204)
+
+    @app.get("/claude/wanted")
+    async def wanted(request: Request, cwd: str) -> Response:
+        authorize(request)
+        return JSONResponse({"wanted": str(Path(cwd).resolve()) in settings.wanted_folders()})
 
     @app.get("/claude/next")
     async def next_command(request: Request) -> Response:

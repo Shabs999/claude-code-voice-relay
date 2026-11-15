@@ -26,6 +26,7 @@ WAITING = "Claude Code in {name} waits at the screen for the operator to approve
 TYPED = "The operator typed this to Claude Code in {name} directly:\n\n{text}"
 LINKED = "Claude Code sessions linked now: {names}."
 QUOTE = 'The operator says, through the voice link: "{text}"'
+DROP_SECONDS = 20.0
 QUIET_SECONDS = 1.5
 REPLY_SECONDS = 4.0  # a message that runs the LLM: its spoken reply starts within this time
 RESUMED = "Claude Code and its last conversation"
@@ -96,6 +97,10 @@ class Bridge:
         self.interval = interval
         self._worker: PipelineWorker | None = None
         self._missed: deque[tuple[float, str, str, str]] = deque(maxlen=50)
+        self._last_dropped: tuple[str, float] | None = None
+        self._drops: dict[str, asyncio.Task[None]] = {}
+        self._replayed_at: float | None = None
+        self._replayed_worker: PipelineWorker | None = None
         self.tts_provider = ""
         self._progress: list[tuple[Session, str]] = []
         self._narrated = 0.0
@@ -129,6 +134,13 @@ class Bridge:
                 self._quiet.set()
 
     def detach(self, worker: PipelineWorker) -> None:
+        if self._replayed_worker is worker:
+            if self._replayed_at is not None and time.monotonic() - self._replayed_at >= 8:
+                self._missed = deque(
+                    (item for item in self._missed if item[0] > self._replayed_at), maxlen=50
+                )
+            self._replayed_worker = None
+            self._replayed_at = None
         if self._worker is worker:
             self._worker = None
             self._quiet.set()
@@ -145,6 +157,13 @@ class Bridge:
 
     def linked_line(self) -> str:
         names = ", ".join(session.name for session in self.sessions.all())
+        if not names and self._last_dropped is not None:
+            name, dropped = self._last_dropped
+            when = time.strftime("%-I:%M %p", time.localtime(dropped))
+            return (
+                f"Claude Code sessions linked now: none. The last one was {name}, "
+                f"which dropped off at {when}."
+            )
         return LINKED.format(names=names or "none")
 
     def state(self) -> list[dict[str, Any]]:
@@ -155,6 +174,9 @@ class Bridge:
 
     async def link(self, session_id: str, name: str, folder: str) -> str:
         session, new = self.sessions.link(session_id, name, folder)
+        pending = self._drops.pop(session.folder, None)
+        if pending is not None:
+            pending.cancel()
         if new and self._worker is not None:
             session.want_history()
             await self._append(self.linked_line(), run=False)
@@ -163,8 +185,33 @@ class Bridge:
         return session.name
 
     async def unlink(self, session_id: str) -> None:
-        if self.sessions.unlink(session_id):
-            await self._append(self.linked_line(), run=False)
+        if session_id not in self.sessions:
+            return
+        session = self.sessions[session_id]
+        self.sessions.unlink(session_id)
+        dropped = time.time()
+        self._last_dropped = (session.name, dropped)
+        pending = self._drops.pop(session.folder, None)
+        if pending is not None:
+            pending.cancel()
+        self._drops[session.folder] = asyncio.create_task(self._announce_drop(session, dropped))
+
+    async def _announce_drop(self, session: Session, dropped: float) -> None:
+        try:
+            await asyncio.sleep(DROP_SECONDS)
+            when = time.strftime("%-I:%M %p", time.localtime(dropped))
+            await self._append(
+                f"The {session.name} session dropped off the voice link just now. "
+                "Say so once in a short sentence; do not pretend it was never linked.",
+                missed=(
+                    "waiting",
+                    session.name,
+                    f"the {session.name} session dropped off the voice link at {when} (local time)",
+                ),
+            )
+        finally:
+            if self._drops.get(session.folder) is asyncio.current_task():
+                self._drops.pop(session.folder, None)
 
     def progress(self, session: Session, line: str) -> None:
         session.running, session.waiting = True, False
@@ -189,12 +236,17 @@ class Bridge:
         self._drop(session)
         if stopped:  # the operator asked for it and heard it confirmed
             return True
-        return await self._append(ANSWER.format(name=session.name, answer=text), missed=("answer", session.name, text))
+        return await self._append(
+            ANSWER.format(name=session.name, answer=text), missed=("answer", session.name, text)
+        )
 
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         self._drop(session)
-        return await self._append(WAITING.format(name=session.name, action=action), missed=("waiting", session.name, action))
+        return await self._append(
+            WAITING.format(name=session.name, action=action),
+            missed=("waiting", session.name, action),
+        )
 
     async def _send_task(self, params: FunctionCallParams) -> None:
         found = self.sessions.find(str(params.arguments.get("session") or ""))
@@ -293,17 +345,24 @@ class Bridge:
     async def replay(self) -> None:
         """Called after the client-ready greeting has been queued."""
         self._prune_missed()
-        if not self._missed or self._worker is None:
+        if not self._missed or self._worker is None or self._replayed_worker is self._worker:
             return
         lines = ["While no voice page was connected, these arrived (oldest first, briefing order):"]
-        for kind, label in (("waiting", "Approvals waiting at the screen"),
-                            ("progress", "Progress (in progress)"), ("answer", "Answers (finished)")):
+        for kind, label in (
+            ("waiting", "Approvals waiting at the screen"),
+            ("progress", "Progress (in progress)"),
+            ("answer", "Answers (finished)"),
+        ):
             items = [f"{name}: {text}" for _, k, name, text in self._missed if k == kind]
             if items:
                 lines.extend([label + ":", *items])
-        lines.append("Give ONE short catch-up: blocked-on-operator first, then in progress, then done, no repetition.")
+        lines.append(
+            "Give ONE short catch-up: blocked-on-operator first, then in progress, then done, "
+            "no repetition."
+        )
+        self._replayed_at = time.monotonic()
+        self._replayed_worker = self._worker
         await self._append("\n".join(lines))
-        self._missed.clear()
 
     async def update_prefs(self, speed: float, voice: str) -> None:
         if self._worker is not None and self.tts_provider == "openai":

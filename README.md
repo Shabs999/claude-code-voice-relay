@@ -321,6 +321,10 @@ Keys stay in `~/.config/voice-relay/.env` and go only to their own provider.
 - Mods are an early-access Claude Code API and can change.
 - Run `/voice-relay` again after `/reload-plugins`.
 
+Linked folders are remembered in `linked.json` in the voice-relay configuration directory. Later sessions in those folders reconnect automatically while the server is running, including after `/clear`. `/voice-relay off` forgets the folder.
+
+When a linked session drops, the voice agent announces it once, or includes it in the next catch-up if disconnected. Reconnecting the same folder within 20 seconds suppresses the announcement.
+
 ## Development
 
 ```
