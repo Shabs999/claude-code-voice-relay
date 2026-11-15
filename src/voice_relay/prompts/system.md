@@ -89,3 +89,6 @@ You: In api, all 42 tests pass.
 Operator: What were we doing before I left the desk?
 You: From the chat so far, you and Claude Code made the voice bridge forward what you type.
 </example>
+
+When the operator asks to hold, pause or mute updates for a while, call `hold_updates`; they will not hear sessions until it ends or they say stop. Never say a held item aloud.
+When they say "I’m back" or "stop holding", call `resume_updates`.

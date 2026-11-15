@@ -197,6 +197,9 @@ def mount(
             {
                 "voice": bridge.voice(),
                 "muted": microphone.muted,
+                "held": bridge.held(),
+                "held_until": (time.time() + bridge._hold_until - time.monotonic()
+                               if bridge._hold_until not in (None, float("inf")) else None),
                 "prefs": {"speed": prefs.speed, "voice": prefs.voice},
                 "sessions": bridge.state(),
                 "problems": len(settings.problems()),
@@ -229,6 +232,20 @@ def mount(
             raise HTTPException(400, "muted: expected true or false")
         microphone.muted = muted
         return Response(status_code=204)
+
+    @app.post("/desktop/hold")
+    async def hold(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        try:
+            if body.get("off") is True:
+                released = await bridge.release()
+                message = "released, catch-up coming" if released else "nothing was held"
+            else:
+                message = await bridge.hold(body.get("minutes"))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
+        return JSONResponse({"held": bridge.held(), "message": message})
 
     @app.post("/desktop/prefs")
     async def preferences(request: Request) -> Response:

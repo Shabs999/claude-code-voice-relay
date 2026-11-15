@@ -362,3 +362,5 @@ task line; nothing is delivered on its own. The plug-in can also fetch context w
 `GET /claude/context` (200 with `id` and `text`, or 204), using `x-claude-session`, and confirms
 submission with `POST /claude/context/ack` and `{"id": "…"}`. Unconfirmed blocks retain their id
 and become available again after 60 seconds.
+
+Ask to hold updates for a while, or until you say “I’m back”. The hold queues all session content, including approvals, and releases one catch-up in briefing order. Microphone mute is separate. Authorised `POST /desktop/hold` accepts `{"minutes": 60}` (1–720 minutes), `{"minutes": 0}` or `{}` until turned off, and `{"off": true}` to release.

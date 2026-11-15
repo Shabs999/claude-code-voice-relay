@@ -111,7 +111,17 @@ OPEN_SESSION = FunctionSchema(
     },
     required=["folder"],
 )
-TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION)
+HOLD_UPDATES = FunctionSchema(
+    name="hold_updates", description="Hold all session updates, including approvals.",
+    properties={"minutes": {"type": "number", "description":
+                "how long, in minutes; leave empty to hold until the operator says to stop"}},
+    required=[],
+)
+RESUME_UPDATES = FunctionSchema(
+    name="resume_updates", description="Release held updates in one catch-up.",
+    properties={}, required=[],
+)
+TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION, HOLD_UPDATES, RESUME_UPDATES)
 
 
 def split_answer(text: str) -> tuple[str, str]:
@@ -187,6 +197,8 @@ class Bridge:
         self._replayed_at: float | None = None
         self._replayed_worker: PipelineWorker | None = None
         self.tts_provider = ""
+        self._hold_until: float | None = None
+        self._hold_timer: asyncio.Task | None = None
         self._updates: list[Update] = []
         self._speaker: asyncio.Task[None] | None = None
         self._update_seen: list[tuple[Update, str]] = []
@@ -196,6 +208,89 @@ class Bridge:
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
+
+    def held(self) -> bool:
+        if self._hold_until is None:
+            return False
+        if time.monotonic() >= self._hold_until:
+            items = self._clear_hold()
+            if items:
+                task = asyncio.create_task(self._deliver_catchup(items))
+                self._notices.add(task)
+                task.add_done_callback(self._notices.discard)
+            return False
+        return True
+
+    async def hold(self, minutes: float | None) -> str:
+        if minutes is not None and (
+            type(minutes) not in (int, float) or (minutes != 0 and not 1 <= minutes <= 720)
+        ):
+            raise ValueError("minutes: expected 1 to 720")
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+        self._hold_until = time.monotonic() + minutes * 60 if minutes else float("inf")
+        for item in self._updates:
+            self._remember_update(item)
+        self._updates = []
+        pending = {item[0] for item in self._missed}
+        self._update_seen = [
+            (item, "held" if item.at in pending else outcome)
+            for item, outcome in self._update_seen
+        ]
+        self._hold_timer = asyncio.create_task(self._end_hold()) if minutes else None
+        return (f"holding updates for {minutes:g} minutes" if minutes
+                else "holding updates until you turn it off")
+
+    async def _end_hold(self) -> None:
+        assert self._hold_until is not None
+        await asyncio.sleep(max(0, self._hold_until - time.monotonic()))
+        await self.release()
+
+    def _clear_hold(self) -> deque | None:
+        self._hold_until = None
+        timer, self._hold_timer = self._hold_timer, None
+        if timer is not None and timer is not asyncio.current_task():
+            timer.cancel()
+        if self._worker is None:
+            return None
+        items, self._missed = self._missed, deque(maxlen=500)
+        return items
+
+    async def _deliver_catchup(self, items: deque) -> bool:
+        if not await self._append(self._briefing(items)):
+            self._missed.extendleft(reversed(items))
+            return False
+        return True
+
+    async def release(self) -> bool:
+        if self._hold_until is None:
+            return False
+        items = self._clear_hold()
+        if items:
+            await self._deliver_catchup(items)
+        return True
+
+    async def _hold_updates(self, params: FunctionCallParams) -> None:
+        minutes = params.arguments.get("minutes")
+        if minutes is not None and type(minutes) not in (int, float):
+            await params.result_callback("not held: minutes must be a number")
+            return
+        try:
+            await self.hold(minutes)
+        except ValueError as error:
+            await params.result_callback(f"not held: {error}")
+            return
+        when = (time.strftime("%-I:%M %p", time.localtime(time.time() + minutes * 60))
+                if minutes else "")
+        await params.result_callback(
+            f"holding until {when}" if when else "holding until you say stop"
+        )
+
+    async def _resume_updates(self, params: FunctionCallParams) -> None:
+        released = await self.release()
+        await params.result_callback(
+            "released, catch-up coming" if released else "nothing was held"
+        )
 
     def operator_said(self, text: str) -> None:
         if not text.strip():
@@ -250,6 +345,8 @@ class Bridge:
         llm.register_function(SEND_TASK.name, self._send_task)
         llm.register_function(ABORT_TURN.name, self._abort)
         llm.register_function(OPEN_SESSION.name, self._open_session)
+        llm.register_function(HOLD_UPDATES.name, self._hold_updates)
+        llm.register_function(RESUME_UPDATES.name, self._resume_updates)
 
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
@@ -361,7 +458,7 @@ class Bridge:
     def progress(self, session: Session, line: str) -> None:
         session.running, session.waiting = True, False
         self._latest[session.name] = (line, time.time())
-        if self._worker is None:
+        if self._worker is None or self.held():
             self._remember("progress", session.name, line)
 
     async def update(
@@ -396,9 +493,10 @@ class Bridge:
             (old for old in self._missed
              if not (old[1].startswith("update-") and old[0] in replaced)), maxlen=500
         )
-        outcome = "queued" if self._worker is None else "spoken"
+        held = self.held()
+        outcome = "held" if held else "queued" if self._worker is None else "spoken"
         self._update_seen.append((item, outcome))
-        if self._worker is None:
+        if self._worker is None or held:
             self._remember_update(item)
         else:
             self._updates.append(item)
@@ -414,6 +512,8 @@ class Bridge:
     async def _speak_updates(self) -> None:
         while self._updates:
             await self._wait_quiet()
+            if self.held():
+                return
             items, self._updates = self._updates, []
             if len(items) < 3:
                 content = "\n\n".join(UPDATE_ONE.format(
@@ -449,6 +549,9 @@ class Bridge:
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
             if detail else ANSWER.format(name=session.name, answer=spoken)
         )
+        if self.held():
+            self._remember("answer", session.name, spoken)
+            return False
         return await self._append(
             content, missed=("answer", session.name, spoken)
         )
@@ -456,6 +559,9 @@ class Bridge:
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         session.asked_at = None
+        if self.held():
+            self._remember("waiting", session.name, action)
+            return False
         return await self._append(
             WAITING.format(name=session.name, action=action),
             missed=("waiting", session.name, action),
@@ -526,7 +632,7 @@ class Bridge:
     async def _remind(self) -> None:
         while self._worker is not None:
             await asyncio.sleep(FALLBACK_SECONDS)
-            if self.quiet_seconds <= 0:
+            if self.quiet_seconds <= 0 or self.held():
                 continue
             for session in self.sessions.all():
                 asked_at = session.asked_at
@@ -534,7 +640,7 @@ class Bridge:
                         or time.monotonic() - asked_at < self.quiet_seconds):
                     continue
                 await self._wait_quiet()
-                if (self._worker is None or self.quiet_seconds <= 0
+                if (self.held() or self._worker is None or self.quiet_seconds <= 0
                         or session.asked_at != asked_at or session.reminded
                         or time.monotonic() - asked_at < self.quiet_seconds
                         or session not in self.sessions.all()):
@@ -562,6 +668,8 @@ class Bridge:
         task.add_done_callback(self._notices.discard)
 
     def _prune_missed(self) -> None:
+        if self._hold_until is not None:
+            return
         cutoff = time.monotonic() - self._catchup_seconds
         while self._missed and self._missed[0][0] < cutoff:
             self._missed.popleft()
@@ -581,34 +689,38 @@ class Bridge:
         self._missed.append((time.monotonic() if at is None else at, kind, name, text,
                              time.time() if wall is None else wall))
 
-    async def replay(self) -> None:
-        """Called after the client-ready greeting has been queued."""
-        self._prune_missed()
-        if not self._missed or self._worker is None or self._replayed_worker is self._worker:
-            return
-        lines = ["While no voice page was connected, these arrived (oldest first, briefing order):"]
+    def _briefing(self, items: Any) -> str:
+        lines = ["While the operator was away or holding updates, these arrived (oldest first, briefing order):"]
         for kinds, label in (
             (("waiting", "update-needs-you"), "Approvals and decisions waiting on the operator"),
             (("progress", "update-milestone"), "Progress (in progress)"),
             (("answer", "update-done"), "Answers (finished)"),
         ):
-            items = [
+            group = [
                 f"{time.strftime('%-I:%M %p', time.localtime(wall))} — {name}: {text}"
-                for _, k, name, text, wall in sorted(self._missed, key=lambda item: item[4])
+                for _, k, name, text, wall in sorted(items, key=lambda item: item[4])
                 if k in kinds
             ]
-            if items:
-                lines.extend([label + ":", *items])
+            if group:
+                lines.extend([label + ":", *group])
         lines.append(
             "Give ONE short catch-up: blocked-on-operator first, then in progress, then done, "
             "no repetition. If there are more than eight items, give the blocked-on-operator "
             "items one by one, then ONE sentence each for in-progress and done, grouped by "
             "project, oldest first; never list more than ten lines aloud."
         )
+        return "\n".join(lines)
+
+    async def replay(self) -> None:
+        """Called after the client-ready greeting has been queued."""
+        self._prune_missed()
+        if (self.held() or not self._missed or self._worker is None
+                or self._replayed_worker is self._worker):
+            return
         replayed = time.monotonic()
         self._replayed_at = replayed
         self._replayed_worker = self._worker
-        if await self._append("\n".join(lines)):
+        if await self._append(self._briefing(self._missed)):
             self._missed = deque(
                 (item for item in self._missed
                  if not (item[1].startswith("update-") and item[0] <= replayed)),
@@ -624,6 +736,7 @@ class Bridge:
     async def _append(
         self, content: str, *, run: bool = True, missed: tuple[str, str, str] | None = None
     ) -> bool:
+        # Link notices bypass holds; session content is held at its entry points.
         worker = self._worker
         if worker is None:
             if missed is not None:
