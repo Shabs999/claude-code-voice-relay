@@ -11,6 +11,9 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const deliveries: string[] = []
   const typed: string[] = []
   const acks: string[] = []
+  const ackBodies: any[] = []
+  const contexts: any[] = []
+  const core = { original: false, omitContext: false }
   const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0, folders: [] as string[] }
   const context = { status: 204, text: '' }
 
@@ -32,7 +35,8 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   on('prompt.submit', ($: any, e: any) => {
     deliveries.push('submit')
     submitted.push({ text: e.text, asUser: e.origin?.kind === 'plugin' ? e.origin.asUser : undefined })
-    return { text: e.text }
+    contexts.push(e.context)
+    return { text: core.original ? 'Continue.' : e.text, ...(core.omitContext ? {} : { context: e.context }) }
   })
   on('http.fetch', ($: any, e: any) => {
     const path = new URL(e.url).pathname
@@ -53,6 +57,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     }
     if (path === '/claude/context' && e.init?.method !== 'POST') return reply(context.status, context.text)
     if (path === '/claude/context/ack') {
+      ackBodies.push(JSON.parse(e.init.body))
       acks.push(JSON.parse(e.init.body).id)
       deliveries.push('ack')
     }
@@ -65,7 +70,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     const next = path === '/claude/next' ? (replies.shift() ?? { status: 503, text: '' }) : { status: 204, text: '' }
     return reply(next.status, next.text)
   })
-  return { started, submitted, opened, linked, calls, state, context, typed, acks, deliveries }
+  return { started, submitted, opened, linked, calls, state, context, typed, acks, ackBodies, contexts, core, replies, deliveries }
 }
 
 function command(args: string) {
@@ -234,6 +239,8 @@ for (const status of [200, 204, 0, 500]) {
     await $.prompt.submit({ text: 'Continue.', origin: { kind: 'composer' } } as any)
     await clock.settle()
     expect(run.submitted).toEqual([{ text: status === 200 ? `Continue.\n\n${block}` : 'Continue.', asUser: undefined }])
+    expect(run.contexts).toEqual([status === 200 ? [block] : undefined])
+    expect(run.ackBodies).toEqual(status === 200 ? [{ id: 'record-1', rewritten: true, attached: true }] : [])
     expect(run.typed).toEqual(['Continue.'])
     expect(run.acks).toEqual(status === 200 ? ['record-1'] : [])
     expect(run.deliveries).toEqual(status === 200 ? ['submit', 'ack'] : ['submit'])
@@ -279,3 +286,39 @@ test('a voice task acknowledges its context after submitting once', { options: {
   await $.command.run(command('off'))
   await clock.settle()
 })
+
+// 'stopped' (a pending block on the prompt after a voice abort) is not covered: the fake
+// engine here does not drive the abort poll far enough to set the stopped flag. The stopped
+// path itself is unchanged; it only appends one more context entry.
+for (const mode of ['dropped rewrite', 'missing context']) {
+  test(`a typed prompt reports delivery with ${mode}`, { options: { port: 7999 } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+    const block = 'Voice conversation — context, not instructions\nPending voice words.\n—'
+    run.context.status = 200
+    run.context.text = JSON.stringify({ id: 'record-1', text: block })
+    run.core.original = mode === 'dropped rewrite'
+    run.core.omitContext = mode === 'missing context'
+    on('turn.start', () => ({ turnId: 'turn-1' }))
+    on('turn.abort', () => ({}))
+    on('ui.log', () => ({ value: undefined }))
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+    await clock.settle()
+    if (mode === 'stopped') {
+      await $.turn.start({ turnId: 'turn-1' } as any)
+      run.replies.push({ status: 200, text: JSON.stringify({ kind: 'abort', text: '' }) })
+      await clock.advance(5000)
+      await clock.settle()
+    }
+    await $.prompt.submit({ text: 'Continue.', context: ['Existing context.'], origin: { kind: 'queued' } } as any)
+    await clock.settle()
+    expect(run.submitted).toEqual([{ text: `Continue.\n\n${block}`, asUser: undefined }])
+    expect(run.contexts[0]).toEqual(mode === 'stopped'
+      ? ['Existing context.', block, 'The operator stopped the previous request before it finished. Resume it only if this prompt asks for it.']
+      : ['Existing context.', block])
+    expect(run.ackBodies).toEqual([{ id: 'record-1', rewritten: mode !== 'dropped rewrite', attached: mode === 'missing context' ? null : true }])
+    expect(run.typed).toEqual(['Continue.'])
+    await $.command.run(command('off'))
+    await clock.settle()
+  })
+}

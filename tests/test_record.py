@@ -129,8 +129,15 @@ async def test_context_routes(monkeypatch):
         assert response.status_code == 200
         assert 'hello' in response.json()['text']
         assert (await client.get('/claude/context', headers=headers)).status_code == 204
-        for context_id in [response.json()['id'], response.json()['id'], 'unknown']:
-            ack = await client.post('/claude/context/ack', headers=headers, json={'id': context_id})
+        for context_id, fields in [
+            (response.json()['id'], {}),
+            (response.json()['id'], {'rewritten': True, 'attached': True}),
+            ('unknown', {'rewritten': False, 'attached': True}),
+            ('unknown', {'rewritten': None, 'attached': None}),
+        ]:
+            ack = await client.post(
+                '/claude/context/ack', headers=headers, json={'id': context_id, **fields}
+            )
             assert ack.status_code == 204
         assert session.record.pending_lines == 0
 

@@ -88,9 +88,13 @@ export const register: Register = (on, options) => {
         } catch { /* Submit unchanged when the record is malformed. */ }
       }
     }
-    const prompt = pending ? { ...e, text: `${e.text}\n\n${pending.text}` } : e
-    const submitted = await next(stopped ? { ...prompt, context: [...(e.context ?? []), STOPPED] } : prompt)
-    if (pending) await call($, link, '/claude/context/ack', { id: pending.id })
+    const prompt = pending ? { ...e, text: `${e.text}\n\n${pending.text}`, context: [...(e.context ?? []), pending.text] } : e
+    const submitted = await next(stopped ? { ...prompt, context: [...(prompt.context ?? []), STOPPED] } : prompt)
+    if (pending) await call($, link, '/claude/context/ack', {
+      id: pending.id,
+      rewritten: typeof submitted.text === 'string' && submitted.text.includes(pending.text.slice(0, 60)),
+      attached: Array.isArray(submitted.context) ? submitted.context.includes(pending.text) : null,
+    })
     if (link.on && TYPED_ORIGINS.has(e.origin?.kind) && e.text.trim() !== '') {
       void call($, link, '/claude/typed', { text: e.text })
     }

@@ -138,7 +138,11 @@ def mount(
     @app.post("/claude/context/ack")
     async def ack_context(request: Request) -> Response:
         session = linked(request)
-        session.record.ack(_text(await _body(request), "id"))
+        body = await _body(request)
+        context_id = _text(body, "id")
+        session.record.ack(context_id)
+        logger.info("voice context {} delivered to {} (rewritten={}, attached={})",
+                    context_id, session.name, body.get("rewritten"), body.get("attached"))
         return Response(status_code=204)
 
     @app.post("/claude/context")
