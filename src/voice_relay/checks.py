@@ -37,7 +37,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
 from . import services
-from .bridge import DEVELOPER, LINKED, PROGRESS, TOOLS
+from .bridge import DEVELOPER, LINKED, TOOLS
 from .settings import SERVER, Settings
 
 SAMPLE = Path(__file__).parent / "sample.wav"
@@ -58,6 +58,7 @@ def _said(text: str) -> dict[str, str]:
 
 
 LINKED_NOW = {"role": DEVELOPER, "content": LINKED.format(names="shop")}
+PROGRESS = "Claude Code progress since the last update:\n\n{progress}"  # interruption probe only
 PROGRESS_NOW = {"role": DEVELOPER, "content": PROGRESS.format(progress="shop: edits billing.py")}
 COMMANDS: list[tuple[str, list[dict[str, Any]], Callable[[str, str, str], bool]]] = [
     (

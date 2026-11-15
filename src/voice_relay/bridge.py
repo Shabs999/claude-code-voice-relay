@@ -690,7 +690,8 @@ class Bridge:
                              time.time() if wall is None else wall))
 
     def _briefing(self, items: Any) -> str:
-        lines = ["While the operator was away or holding updates, these arrived (oldest first, briefing order):"]
+        lines = ["While the operator was away or holding updates, these arrived "
+                 "(oldest first, briefing order):"]
         for kinds, label in (
             (("waiting", "update-needs-you"), "Approvals and decisions waiting on the operator"),
             (("progress", "update-milestone"), "Progress (in progress)"),
