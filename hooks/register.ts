@@ -38,7 +38,7 @@ export const register: Register = (on, options) => {
       description: 'Talk to this session by voice. /voice-relay settings, off, quit.',
       argumentHint: '[settings|off|quit]',
     })
-    if (!link.on) await relink($, link, options)
+    if (!link.on) await relink($, link, options, true)
     return started
   })
 
@@ -117,12 +117,26 @@ async function wanted($: EngineInterface, link: Link): Promise<boolean> {
   try { return JSON.parse(reply.text).wanted === true } catch { return false }
 }
 
-async function relink($: EngineInterface, link: Link, options: PluginOptions): Promise<void> {
+async function locallyWanted($: EngineInterface): Promise<boolean> {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  if (home === undefined) return false
+  try {
+    const folders: unknown = JSON.parse(await $.fs.read(`${home}/.config/voice-relay/linked.json`))
+    return Array.isArray(folders) && folders.every(folder => typeof folder === 'string') &&
+      folders.includes(await $.session.cwd())
+  } catch { return false }
+}
+
+async function relink($: EngineInterface, link: Link, options: PluginOptions, sessionStart = false): Promise<void> {
   const now = Date.now()
   if (link.disabled || (link.lastAttempt !== undefined && now - link.lastAttempt < 30_000)) return
   link.lastAttempt = now
-  if (!(await up($, link))) return
-  if ((await $.env.get('VOICE_RELAY_LINK')) === '1' || await wanted($, link)) await connect($, link, options, true)
+  const running = await up($, link)
+  if (!running && !sessionStart) return
+  if ((await $.env.get('VOICE_RELAY_LINK')) === '1' ||
+      (running ? await wanted($, link) : await locallyWanted($))) {
+    await connect($, link, options, !sessionStart)
+  }
 }
 
 /** Links the session and opens the voice window, which asks for any missing key itself. */

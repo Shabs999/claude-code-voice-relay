@@ -115,12 +115,16 @@ def stop() -> None:
 
 
 async def _idle_stop(active: Callable[[], bool]) -> None:
+    seconds = settings.idle_seconds(IDLE_SECONDS)
+    if seconds == 0:
+        logger.info("voice-relay: idle stop is off")
+        return
     since = time.monotonic()
     while True:
         await asyncio.sleep(CHECK_SECONDS)
         if active():
             since = time.monotonic()
-        elif time.monotonic() - since > IDLE_SECONDS:
+        elif time.monotonic() - since > seconds:
             logger.info("voice-relay: no session and no voice client, stopping")
             stop()
             return

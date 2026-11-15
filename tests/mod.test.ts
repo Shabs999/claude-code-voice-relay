@@ -8,14 +8,16 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const opened: string[] = []
   const linked: string[] = []
   const calls: string[] = []
-  const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0 }
+  const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0, folders: [] as string[] }
 
   on('session.start', () => ({ cwd: '/work/shop' }))
   on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   on('command.register', ($: any, e: any) => ({ value: { command: e.name } }))
   on('ui.status', () => ({ value: undefined }))
   on('env.get', ($: any, e: any) => ({ value: env[e.name] ?? '/home/op' }))
-  on('fs.read', () => ({ value: 'token-1\n' }))
+  on('fs.read', ($: any, e: any) => ({
+    value: e.path.endsWith('/linked.json') ? JSON.stringify(state.folders) : 'token-1\n',
+  }))
   on('session.id', () => ({ value: state.id }))
   on('session.cwd', () => ({ value: '/work/shop' }))
   on('process.run', ($: any, e: any) => {
@@ -115,10 +117,10 @@ test('after /clear the link ends, and /voice-relay links the new session id', { 
 test('a session started with VOICE_RELAY_LINK=1 links with no command', { options: { port: 7999 } }, async ($, on) => {
   const clock = mock.clock(on)
   const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
-  run.state.up = true
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
   await clock.advance(2000)
   await clock.settle()
+  expect(run.started).toHaveLength(1)
   expect(run.linked).toEqual(['shop /work/shop'])
   await $.command.run(command('off'))
   await clock.settle()
@@ -171,12 +173,40 @@ test('prompt relink attempts are throttled for 30 seconds', { options: { port: 7
   await clock.settle()
 })
 
-test('automatic relinking leaves a stopped server alone', { options: { port: 7999 } }, async ($, on) => {
+test('a prompt leaves a stopped server alone', { options: { port: 7999 } }, async ($, on) => {
   const clock = mock.clock(on)
-  const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+  const run = setup(on, [])
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  run.state.folders = ['/work/shop']
+  await clock.advance(30_000)
   await $.prompt.submit({ text: 'Continue.', asUser: true })
   await clock.settle()
   expect(run.started).toHaveLength(0)
   expect(run.linked).toHaveLength(0)
+})
+
+
+test('session start starts a stopped server for a remembered folder', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  run.state.folders = ['/work/shop']
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await clock.settle()
+  expect(run.started).toHaveLength(1)
+  expect(run.linked).toEqual(['shop /work/shop'])
+  await $.command.run(command('off'))
+  await clock.settle()
+})
+
+
+test('session start leaves a stopped server alone for an unwanted folder', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  run.state.folders = ['/work/other']
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await clock.settle()
+  expect(run.started).toHaveLength(0)
+  expect(run.linked).toHaveLength(0)
+  await $.command.run(command('off'))
+  await clock.settle()
 })

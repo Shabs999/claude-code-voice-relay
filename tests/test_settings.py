@@ -26,3 +26,21 @@ def test_your_server_reads_and_checks_each_stage_the_same_way() -> None:
 def test_openai_speed_ceiling() -> None:
     assert settings.load({"VOICE_RELAY_TTS_SPEED": "2.0"}).speed == 2.0
     assert settings.load({"VOICE_RELAY_TTS_SPEED": "2.5"}).speed == 2.0
+
+
+def test_idle_seconds(monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setattr(settings, "environment", lambda: {})
+    assert settings.idle_seconds() == 600.0
+    for value, expected in (("0", 0.0), ("12.5", 12.5)):
+        monkeypatch.setattr(
+            settings, "environment", lambda value=value: {"VOICE_RELAY_IDLE_SECONDS": value}
+        )
+        assert settings.idle_seconds() == expected
+    for value in ("-5", "abc", "nan"):
+        monkeypatch.setattr(
+            settings, "environment", lambda value=value: {"VOICE_RELAY_IDLE_SECONDS": value}
+        )
+        with pytest.raises(settings.SettingsError):
+            settings.idle_seconds()

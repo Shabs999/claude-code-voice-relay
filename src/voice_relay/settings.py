@@ -87,6 +87,7 @@ FIELDS = (
     "VOICE_RELAY_PROJECTS",
     "VOICE_RELAY_TERMINAL",
     "VOICE_RELAY_NARRATION_SECONDS",
+    "VOICE_RELAY_IDLE_SECONDS",
 )
 SECRETS = (*KEYS.values(), "VOICE_RELAY_STT_KEY", "VOICE_RELAY_LLM_KEY", "VOICE_RELAY_TTS_KEY")
 SERVERS = (SERVER, *APPS)  # their key comes from VOICE_RELAY_<STAGE>_KEY
@@ -199,6 +200,10 @@ def version() -> str:
 
 def port() -> int:
     return _number(environment(), "VOICE_RELAY_PORT", 7860, 1024, 65535)
+
+
+def idle_seconds(default: float = 600.0) -> float:
+    return _number(environment(), "VOICE_RELAY_IDLE_SECONDS", default, 0.0, float("inf"))
 
 
 def prompt() -> str:
