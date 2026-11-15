@@ -755,7 +755,7 @@ class Bridge:
         if await self.say(self._briefing(self._missed)):
             self._missed = deque(
                 (item for item in self._missed
-                 if not (item[1].startswith("update-") and item[0] <= replayed)),
+                 if item[0] > replayed),
                 maxlen=500,
             )
 

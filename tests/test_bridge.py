@@ -236,7 +236,7 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     )
     stamp = bridge_module.time.strftime("%-I:%M %p", bridge_module.time.localtime(1700000000))
     assert f"{stamp}, shop: finished" in text
-    assert bridge._missed
+    assert not bridge._missed
     clock[0] += 10
     bridge.detach(worker)  # type: ignore[arg-type]
     assert not bridge._missed
@@ -260,8 +260,8 @@ async def test_missed_updates_have_count_and_replay_age_limits(
     assert not worker.frames and not bridge._missed
 
 
-@pytest.mark.parametrize("seconds, retained", [(1, True), (10, False)])
-async def test_replay_retained_until_client_survives(
+@pytest.mark.parametrize("seconds, retained", [(1, False), (10, False)])
+async def test_replay_consumed_even_on_quick_reconnect(
     seconds: int, retained: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock = [1000.0]
@@ -470,3 +470,51 @@ async def test_empty_speech_does_not_authorize_task():
     bridge.operator_said("   ")
     assert bridge._spoke_at is None
     assert not bridge._operator_spoke_recently()
+
+
+async def test_answer_catchup_once_across_workers() -> None:
+    bridge = Bridge(interval=0)
+    bridge._remember("answer", "shop", "Finished.")
+    first = Worker()
+    bridge.attach(first)
+    await bridge.replay()
+    assert len(first.frames) == 1
+    bridge.detach(first)
+    second = Worker()
+    bridge.attach(second)
+    await bridge.replay()
+    assert not second.frames
+    bridge.detach(second)
+
+
+async def test_hold_catchup_consumed_before_reconnect() -> None:
+    bridge = Bridge(interval=0)
+    first = Worker()
+    bridge.attach(first)
+    await bridge.hold(None)
+    bridge._remember("answer", "shop", "Finished.")
+    await bridge.release()
+    assert len(first.frames) == 1
+    assert not bridge._missed
+    bridge.detach(first)
+    second = Worker()
+    bridge.attach(second)
+    await bridge.replay()
+    assert not second.frames
+    bridge.detach(second)
+
+
+async def test_replay_failed_say_keeps_items(monkeypatch) -> None:
+    bridge = Bridge(interval=0)
+    worker = Worker()
+    bridge.attach(worker)
+    bridge._remember("answer", "shop", "Finished.")
+    say = bridge.say
+
+    async def disconnected(text):
+        bridge.detach(worker)
+        return await say(text)
+
+    monkeypatch.setattr(bridge, "say", disconnected)
+    await bridge.replay()
+    assert len(bridge._missed) == 1

@@ -11,13 +11,21 @@ from dataclasses import dataclass, field
 FILLERS = (
     r"sent[.!…]*", r"sent to\b.*", r"done[.!…]*", r"okay[.!…]*",
     r"ready\b.*", r"i['\u2019]m ready\b.*", r"nothing is waiting on you[.!…]*",
-    r"no question is open[.!…]*", r"yes,?.*i can hear you[.!…]*",
+    r"no question is (?:waiting|open)[.!…]*", r"yes,?.*i can hear you[.!…]*",
     r"sorry,? i missed that[.!…]*",
+    r"there is no question (?:waiting|open)[.!…]*",
+    r"no action is needed\b.*",
+    r"(?:you )?(?:don['\u2019]t|do not) need to do anything\b.*",
+    r"nothing else is new(?: yet)?[.!…]*",
+    r"let me know when you want\b.*",
 )
 
 
+FILLER_PATTERN = re.compile("(?:" + "|".join(FILLERS) + ")", re.I)
+
+
 def filler(text: str) -> bool:
-    return any(re.fullmatch(pattern, text.strip(), re.I) for pattern in FILLERS)
+    return FILLER_PATTERN.fullmatch(text.strip()) is not None
 
 
 @dataclass

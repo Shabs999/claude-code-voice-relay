@@ -60,7 +60,12 @@ async def test_gag_drops_only_llm_text(gag):
     for frame in frames:
         await processor.process_frame(frame, FrameDirection.DOWNSTREAM)
     pushed = [call.args[0] for call in processor.push_frame.call_args_list]
-    assert pushed == [f for f in frames if not (gag and isinstance(f, LLMTextFrame))]
+    assert [f for f in pushed if not isinstance(f, LLMTextFrame)] == [
+        f for f in frames if not isinstance(f, LLMTextFrame)
+    ]
+    assert "".join(f.text for f in pushed if isinstance(f, LLMTextFrame)) == (
+        "" if gag else "Padding.More padding."
+    )
     if gag:
         bridge.dispatcher_said.assert_not_called()
         bridge.dispatcher_silent.assert_not_called()

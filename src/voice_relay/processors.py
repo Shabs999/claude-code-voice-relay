@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from loguru import logger
 from pipecat.frames.frames import (
     Frame,
@@ -14,6 +16,8 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+from .record import FILLER_PATTERN
 
 LONG_CHARS = 300  # a preamble is shorter, a long answer streams after this
 
@@ -81,12 +85,13 @@ class Preamble(FrameProcessor):
 
 
 class SpokenReply(FrameProcessor):
-    """Records the text surviving Preamble, immediately before synthesis."""
+    """Filters filler sentences and records replies immediately before synthesis."""
 
     def __init__(self, bridge) -> None:
         super().__init__()
         self._bridge = bridge
         self._dropped = False
+        self._pending = ""
         self._parts: list[str] = []
         self._active = False
         self._tool = False
@@ -101,17 +106,33 @@ class SpokenReply(FrameProcessor):
                 return
             if isinstance(frame, LLMFullResponseStartFrame):
                 self._dropped = False
+                self._pending = ""
                 self._parts, self._active, self._tool = [], True, False
             elif isinstance(frame, LLMTextFrame) and self._active:
-                self._parts.append(frame.text)
+                self._pending += frame.text
+                await self._flush_sentences()
+                return
             elif isinstance(frame, FunctionCallsStartedFrame):
                 self._tool = True
                 self._bridge.tool_called()
             elif isinstance(frame, (InterruptionFrame, UserStartedSpeakingFrame)):
+                self._pending = ""
                 self._finish(cut=True)
             elif isinstance(frame, LLMFullResponseEndFrame):
+                await self._flush_sentences(final=True)
                 self._finish()
         await self.push_frame(frame, direction)
+
+    async def _flush_sentences(self, final: bool = False) -> None:
+        while self._pending:
+            boundary = re.search(r"[.?!]\s+", self._pending)
+            if boundary is None and not final:
+                return
+            end = boundary.end() if boundary else len(self._pending)
+            sentence, self._pending = self._pending[:end], self._pending[end:]
+            if not self._bridge.gagged() and not FILLER_PATTERN.fullmatch(sentence.strip()):
+                self._parts.append(sentence)
+                await self.push_frame(LLMTextFrame(sentence))
 
     def _finish(self, cut: bool = False) -> None:
         if not self._active:
