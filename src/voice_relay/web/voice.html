@@ -94,7 +94,14 @@ h2 { margin: 0 0 6px; font-size: var(--wa-font-size-xs); text-transform: upperca
 li.waiting { outline: 1px solid var(--waiting); }
 .empty { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-s); }
 
-.log-wrap { flex: 1; min-height: 120px; display: flex; flex-direction: column; }
+#sessions-fold { border: 0; padding: 0; margin: 0; background: none; box-shadow: none; }
+#sessions-fold summary { list-style: none; cursor: pointer; font-size: var(--wa-font-size-s); color: var(--wa-color-text-quiet); padding: 8px 10px; border-radius: var(--wa-border-radius-m); background: var(--wa-color-surface-lowered); min-height: 40px; display: flex; align-items: center; gap: 8px; box-sizing: border-box; border: 0; box-shadow: none; margin: 0; }
+#sessions-fold summary::-webkit-details-marker { display: none; }
+#sessions-fold summary::after { content: ""; display: block; width: 8px; height: 8px; margin-left: auto; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); rotate: none; margin-top: -4px; transition: transform .15s; }
+#sessions-fold[open] summary::after { transform: rotate(-135deg); margin-top: 4px; }
+#sessions-fold > .sessions { margin: 4px 0 0; padding: 0; }
+
+.log-wrap { flex: 1; min-height: 45vh; display: flex; flex-direction: column; }
 .log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
 .line { max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
@@ -151,10 +158,11 @@ li.waiting { outline: 1px solid var(--waiting); }
       <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
       <wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button>
     </div>
-    <div>
-      <h2>Claude Code sessions</h2>
+    <ul class="sessions" id="active-sessions"></ul>
+    <details id="sessions-fold">
+      <summary id="sessions-summary"></summary>
       <ul class="sessions" id="sessions"></ul>
-    </div>
+    </details>
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
@@ -536,6 +544,17 @@ function restart(reason) {
   return connect(true, reason);
 }
 
+function setAudioSession(type) {
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== type) {
+      navigator.audioSession.type = type;
+      note("audio-session", type);
+    }
+  } catch (e) {
+    note("audio-session-failed", type, e?.message || e);
+  }
+}
+
 let micGeneration = 0;
 async function releaseMic() {
   note("mic-released");
@@ -555,6 +574,7 @@ async function releaseMic() {
     // Private Daily field — forceDiscardTrack actually releases the iOS mic.
     try { transport.mediaManager?._daily?.setLocalAudio?.(false, { forceDiscardTrack: true }); } catch { /* */ }
   } catch { /* not connected yet */ }
+  setAudioSession("playback");
 }
 
 async function takeMic() {
@@ -564,18 +584,21 @@ async function takeMic() {
   const generation = ++micGeneration;
   let stream = null;
   try {
+    setAudioSession("auto");
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     // a mute (or leaving the page) while the phone was opening the mic wins: never revive it
-    if (generation !== micGeneration || document.hidden) { stream.getTracks().forEach(t => t.stop()); return false; }
+    if (generation !== micGeneration || document.hidden) { stream.getTracks().forEach(t => t.stop()); return false; }  // the newer request or the mute that cancelled us owns the audio mode
     localMicStream = stream;
     await sender.replaceTrack(stream.getAudioTracks()[0]);
+    setAudioSession("play-and-record");
     client.enableMic(true);
-    note("mic-taken");
+    note("mic-taken", "", stream.getAudioTracks()[0]?.label || "");
     return true;
   } catch {
     stream?.getTracks().forEach(t => t.stop());
     if (localMicStream === stream) localMicStream = null;
     $("hint").textContent = "Allow the microphone for this page, then tap.";
+    setAudioSession("playback");
     return false;
   }
 }
@@ -685,15 +708,35 @@ function say(who, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function sessionRow(session) {
+  const doing = session.waiting ? "waiting" : session.running ? "working" : "idle";
+  return el("li", { class: doing }, el("span", { class: `dot ${doing}` }), el("span", { class: "name", text: session.name }), el("span", { class: "doing", text: DOING[doing] }));
+}
+
 function renderSessions(sessions) {
+  const summary = $("sessions-summary");
   if (!sessions.length) {
+    summary.textContent = "No session linked";
+    $("active-sessions").replaceChildren();
     $("sessions").replaceChildren(el("li", { class: "empty", text: "No session linked. Run /voice-relay in Claude Code." }));
     return;
   }
-  $("sessions").replaceChildren(...sessions.map(session => {
-    const doing = session.waiting ? "waiting" : session.running ? "working" : "idle";
-    return el("li", { class: doing }, el("span", { class: `dot ${doing}` }), el("span", { class: "name", text: session.name }), el("span", { class: "doing", text: DOING[doing] }));
-  }));
+  const active = sessions.filter(s => s.waiting || s.running);
+  $("active-sessions").replaceChildren(...active.map(sessionRow));
+  $("sessions").replaceChildren(...sessions.map(sessionRow));
+  const n = sessions.length;
+  let waiting = 0, working = 0;
+  for (const s of sessions) {
+    if (s.waiting) waiting++;
+    else if (s.running) working++;
+  }
+  const parts = [`${n} session${n === 1 ? "" : "s"}`];
+  if (waiting === 0 && working === 0) parts.push("all idle");
+  else {
+    if (waiting) parts.push(`${waiting} waiting for you`);
+    if (working) parts.push(`${working} working`);
+  }
+  summary.textContent = parts.join(" · ");
 }
 
 async function poll() {
@@ -786,7 +829,15 @@ for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () =>
 });
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 
+const sessionsFold = $("sessions-fold");
+try { sessionsFold.open = localStorage.getItem("voice-sessions-open") === "1"; } catch { /* storage can be disabled */ }
+sessionsFold.addEventListener("toggle", () => {
+  try { localStorage.setItem("voice-sessions-open", sessionsFold.open ? "1" : "0"); } catch { /* storage can be disabled */ }
+});
+
 note("page-load");
+setAudioSession("playback");
+note("audio-session-api", navigator.audioSession ? "yes" : "no");
 await Promise.all(["wa-button"].map(tag => customElements.whenDefined(tag)));
 state = await api("/settings/state");
 if (state.problems.length) await showSetup();
