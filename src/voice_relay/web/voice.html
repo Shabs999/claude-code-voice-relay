@@ -184,7 +184,7 @@ const DOING = { working: "works", waiting: "waits for your OK", idle: "idle" };
 const KEPT_LINES = 80;
 const $ = id => document.getElementById(id);
 const audio = new Audio();
-let state = null, picks = {}, typed = {}, client = null, connected = false, muted = false, speaking = false, lastAgent = null;
+let state = null, picks = {}, typed = {}, client = null, transport = null, localMicStream = null, connected = false, muted = false, speaking = false, lastAgent = null;
 let wanted = false, retryTimer = null, retryStep = 0;
 let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
@@ -525,17 +525,69 @@ function wake() {
 }
 async function restart() {
   const previous = client;
-  client = null; connected = false;
+  client = null; transport = null; localMicStream = null; connected = false;
   await previous?.disconnect().catch(() => {});
   wake();
 }
+
+let micGeneration = 0;
+async function releaseMic() {
+  micGeneration++;  // cancels any takeMic() still waiting for the phone
+  if (!client || !transport) return;
+  try {
+    client.enableMic(false);
+    const sender = transport.getAudioTransceiver()?.sender;
+    if (localMicStream) {
+      localMicStream.getTracks().forEach(track => track.stop());
+      localMicStream = null;
+    }
+    if (sender?.track) {
+      sender.track.stop();
+      await sender.replaceTrack(null);
+    }
+    // Private Daily field — forceDiscardTrack actually releases the iOS mic.
+    try { transport.mediaManager?._daily?.setLocalAudio?.(false, { forceDiscardTrack: true }); } catch { /* */ }
+  } catch { /* not connected yet */ }
+}
+
+async function takeMic() {
+  if (!client || !transport) return false;
+  const sender = transport.getAudioTransceiver()?.sender;
+  if (!sender) return false;
+  const generation = ++micGeneration;
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // a mute (or leaving the page) while the phone was opening the mic wins: never revive it
+    if (generation !== micGeneration || document.hidden) { stream.getTracks().forEach(t => t.stop()); return false; }
+    localMicStream = stream;
+    await sender.replaceTrack(stream.getAudioTracks()[0]);
+    client.enableMic(true);
+    return true;
+  } catch {
+    stream?.getTracks().forEach(t => t.stop());
+    if (localMicStream === stream) localMicStream = null;
+    $("hint").textContent = "Allow the microphone for this page, then tap.";
+    return false;
+  }
+}
+
+async function muteHere() {
+  await releaseMic();
+  muted = true;
+  show();
+  await desktopApi("/desktop/mute", { muted: true }).catch(() => {});
+}
+
 async function connect() {
   wanted = true;
   if (client) return;
   clearTimeout(retryTimer); retryTimer = null;
   show(retryStep ? "reconnecting" : "connecting");
+  const link = new SmallWebRTCTransport();
+  transport = link;
   const attempt = new PipecatClient({
-    transport: new SmallWebRTCTransport(),
+    transport: link,
     enableMic: true,
     enableCam: false,
     callbacks: {
@@ -552,7 +604,7 @@ async function connect() {
       onBotStoppedSpeaking() { speaking = false; lastAgent = null; show(); },
       onDisconnected() {
         if (client !== attempt) return;
-        client = null; connected = false; speaking = false;
+        client = null; transport = null; localMicStream = null; connected = false; speaking = false;
         if (wanted) retry(); else show();
       },
     },
@@ -564,9 +616,10 @@ async function connect() {
     if (client !== attempt) return;
     connected = true; retryStep = 0;
     clearTimeout(retryTimer); retryTimer = null;
+    if (muted) await releaseMic();
   } catch (error) {
     if (client !== attempt) return;
-    client = null;
+    client = null; transport = null; localMicStream = null;
     attempt.disconnect().catch(() => {});
     $("hint").textContent = /permission|denied|notallowed/i.test(String(error)) ? "Allow the microphone for this page, then tap." : "Could not connect. Tap to try again.";
   }
@@ -621,7 +674,16 @@ async function poll() {
     pollFailCount = 0;
     lastPollVoice = now.voice;
     renderSessions(now.sessions);
-    if (now.muted !== muted) { muted = now.muted; show(); }
+    if (now.muted !== muted) {
+      const wasMuted = muted;
+      muted = now.muted;
+      if (muted && !wasMuted) await releaseMic();
+      else if (!muted && wasMuted && !document.hidden) {
+        const ok = await takeMic();
+        if (!ok) muted = true;
+      }
+      show();
+    }
     const saved = config !== undefined && now.config !== config;  // in the settings page or the file
     config = now.config;
     if (back && connected) { voiceMismatchCount = 0; restart(); }
@@ -637,8 +699,13 @@ async function poll() {
 
 $("mic").addEventListener("click", async () => {
   if (!connected) { $("hint").textContent = ""; await connect(); return; }
-  muted = !muted; show();
-  await desktopApi("/desktop/mute", { muted }).catch(() => {});
+  if (!muted) await muteHere();
+  else {
+    if (!(await takeMic())) return;
+    muted = false;
+    show();
+    await desktopApi("/desktop/mute", { muted: false }).catch(() => {});
+  }
 });
 $("sound").addEventListener("click", () => audio.play().then(() => $("sound").classList.add("hidden")));
 $("setup").addEventListener("submit", testAndStart);
@@ -647,7 +714,11 @@ $("tip-close").addEventListener("click", () => $("tip").classList.add("hidden"))
 $("gear").addEventListener("click", showSetup);
 $("back").addEventListener("click", event => { event.preventDefault(); $("setup").classList.add("hidden"); $("talk").classList.remove("hidden"); });
 for (const event of ["pageshow", "focus", "online"]) addEventListener(event, wake);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) wake(); });
+addEventListener("pagehide", () => { if (connected && !muted) void muteHere(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { if (connected && !muted) void muteHere(); }
+  else wake();
+});
 for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () => {
   if (id === "speed") speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
   else voice = voices[(voices.indexOf(voice) + 1) % voices.length];
