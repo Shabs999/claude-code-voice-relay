@@ -367,3 +367,39 @@ def test_missed_updates_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
     clock[0] = 1000 + 8 * 3600 + 60
     bridge._prune_missed()
     assert [item[3] for item in bridge._missed] == ["recent"]
+
+
+async def test_answer_detail_is_only_in_detail_block() -> None:
+    bridge, worker = await voiced("shop")
+    assert await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
+    (frame,) = worker.frames
+    (message,) = frame.messages
+    assert message["role"] == "developer"
+    content = message["content"]
+    assert "\nDone.\n" in content
+    assert "<detail>\nPrivate detail.\n</detail>" in content
+    assert "Private detail." not in content.split("<detail>")[0]
+    assert "Private detail." not in content.split("</detail>")[1]
+
+
+async def test_answer_catchup_contains_only_spoken_part() -> None:
+    bridge = Bridge(interval=0)
+    await bridge.link("shop", "shop", "")
+    assert not await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
+    await bridge.replay()  # no worker yet; keep the answer for catch-up
+    assert [(kind, text) for _, kind, _, text, _ in bridge._missed] == [("answer", "Done.")]
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge.replay()
+    (frame,) = worker.frames
+    assert "shop: Done." in frame.messages[0]["content"]
+    assert "Private detail." not in frame.messages[0]["content"]
+
+
+async def test_stopped_answer_appends_nothing() -> None:
+    bridge, worker = await voiced("shop")
+    session = bridge.sessions["shop"]
+    session.stopping = True
+    assert await bridge.answer(session, STOPPED)
+    assert not worker.frames
+    assert not bridge._missed

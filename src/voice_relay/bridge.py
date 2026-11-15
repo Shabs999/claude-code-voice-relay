@@ -4,6 +4,7 @@ hears. Progress stays silent; voice requests get one reminder if no news arrives
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -21,6 +22,13 @@ from .sessions import ABORT, TASK, Session, Sessions, key
 
 DEVELOPER = "developer"
 ANSWER = "Claude Code in {name} finished its turn. Its final text:\n\n{answer}"
+ANSWER_SPLIT = (
+    "Claude Code in {name} finished its turn.\n"
+    "Spoken part, say this (in these words or shorter, naming the session once):\n"
+    "{spoken}\n\n"
+    'Detail, only if the operator asks "tell me more"; do not read it unasked:\n'
+    "<detail>\n{detail}\n</detail>"
+)
 STOPPED = "(The operator stopped this turn before it finished.)"  # the mod's ABORTED
 FALLBACK = (
     '{name} is still working on your request, "{task}", with no update yet. '
@@ -104,6 +112,37 @@ OPEN_SESSION = FunctionSchema(
     required=["folder"],
 )
 TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION)
+
+
+def split_answer(text: str) -> tuple[str, str]:
+    """Separate the brief spoken answer from optional detail without changing its words."""
+    text = text.replace("\r\n", "\n").strip()
+    fence = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        marker = re.match(r"^`{3,}", stripped)
+        if marker:
+            width = len(marker[0])
+            if not fence:
+                fence = width
+            elif width >= fence and not stripped[width:].strip():
+                fence = 0
+        elif not fence and re.fullmatch(r"-{3,}", stripped):
+            spoken = text[:offset].strip()
+            if spoken:
+                return spoken, text[offset + len(line):].strip()
+            break
+        offset += len(line)
+
+    paragraph = re.split(r"\n[ \t]*\n", text, maxsplit=1)[0]
+    end = len(paragraph)
+    if end > 300:
+        sentences = list(re.finditer(r"[.?!] ", paragraph[:301]))
+        end = sentences[-1].start() + 1 if sentences else paragraph.rfind(" ", 0, 301)
+        if end <= 0:
+            end = 300
+    return text[:end].strip(), text[end:].strip()
 
 
 @dataclass
@@ -405,8 +444,13 @@ class Bridge:
         session.asked_at = None
         if stopped:  # the operator asked for it and heard it confirmed
             return True
+        spoken, detail = split_answer(text)
+        content = (
+            ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
+            if detail else ANSWER.format(name=session.name, answer=spoken)
+        )
         return await self._append(
-            ANSWER.format(name=session.name, answer=text), missed=("answer", session.name, text)
+            content, missed=("answer", session.name, spoken)
         )
 
     async def waiting(self, session: Session, action: str) -> bool:
