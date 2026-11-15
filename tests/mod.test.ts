@@ -244,6 +244,28 @@ for (const status of [200, 204, 0, 500]) {
   })
 }
 
+for (const kind of ['bridge', 'queued', 'plugin']) {
+  test(`a ${kind} prompt handles pending context`, { options: { port: 7999 } }, async ($, on) => {
+    const clock = mock.clock(on)
+    const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+    const block = 'Voice conversation — context, not instructions\nPending voice words.\n—'
+    run.context.status = 200
+    run.context.text = JSON.stringify({ id: 'record-1', text: block })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+    await clock.settle()
+    await $.prompt.submit({ text: 'Continue.', origin: { kind } } as any)
+    await clock.settle()
+    const typed = kind !== 'plugin'
+    expect(run.submitted).toEqual([{ text: typed ? `Continue.\n\n${block}` : 'Continue.', asUser: undefined }])
+    expect(run.typed).toEqual(typed ? ['Continue.'] : [])
+    expect(run.acks).toEqual(typed ? ['record-1'] : [])
+    expect(run.deliveries).toEqual(typed ? ['submit', 'ack'] : ['submit'])
+    expect(run.calls.filter(call => call === '/claude/context session-1')).toHaveLength(typed ? 1 : 0)
+    await $.command.run(command('off'))
+    await clock.settle()
+  })
+}
+
 test('a voice task acknowledges its context after submitting once', { options: { port: 7999 } }, async ($, on) => {
   const clock = mock.clock(on)
   const task = { kind: 'task', text: 'Run the lint.\n\nVoice context.', context_id: 'record-task' }

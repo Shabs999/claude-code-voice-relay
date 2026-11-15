@@ -8,6 +8,7 @@ const HISTORY_CHARS = 24_000 // the newest messages of the session, about 6k tok
 const MESSAGE_CHARS = 4_000
 const TOKEN_FILE = '.config/voice-relay/token'
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+const TYPED_ORIGINS = new Set(['composer', 'bridge', 'queued'])
 const STOPPED =
   'The operator stopped the previous request before it finished. Resume it only if this prompt asks for it.'
 const ABORTED = '(The operator stopped this turn before it finished.)'
@@ -73,7 +74,7 @@ export const register: Register = (on, options) => {
     if (!link.on) await relink($, link, options)
     const stopped = link.stopped === true
     link.stopped = false
-    const composer = link.on && e.origin?.kind === 'composer' && e.text.trim() !== ''
+    const composer = link.on && TYPED_ORIGINS.has(e.origin?.kind) && e.text.trim() !== ''
     let pending: { id: string; text: string } | undefined
     if (composer) {
       const reply = await Promise.race([
@@ -90,7 +91,7 @@ export const register: Register = (on, options) => {
     const prompt = pending ? { ...e, text: `${e.text}\n\n${pending.text}` } : e
     const submitted = await next(stopped ? { ...prompt, context: [...(e.context ?? []), STOPPED] } : prompt)
     if (pending) await call($, link, '/claude/context/ack', { id: pending.id })
-    if (link.on && e.origin?.kind === 'composer' && e.text.trim() !== '') {
+    if (link.on && TYPED_ORIGINS.has(e.origin?.kind) && e.text.trim() !== '') {
       void call($, link, '/claude/typed', { text: e.text })
     }
     return submitted
