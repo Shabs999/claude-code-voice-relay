@@ -3,6 +3,9 @@ import { expect, mock, test } from 'claude-code/testing'
 type Reply = { status: number; text: string }
 
 function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
+  const registered: any[] = []
+  const updates: any[] = []
+  const updateReply = { status: 200, text: '{"outcome":"spoken"}' }
   const started: { argv: readonly string[]; env?: Record<string, string> }[] = []
   const submitted: { text: string; asUser?: boolean }[] = []
   const opened: string[] = []
@@ -20,6 +23,11 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   on('session.start', () => ({ cwd: '/work/shop' }))
   on('session.end', ($: any, e: any) => ({ sessionId: e.sessionId }))
   on('command.register', ($: any, e: any) => ({ value: { command: e.name } }))
+  on('tool.register', ($: any, e: any) => {
+    registered.push(e)
+    return { value: { tool: `mcp__voice-relay__${e.name}` } }
+  })
+  on('ui.log', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('env.get', ($: any, e: any) => ({ value: env[e.name] ?? '/home/op' }))
   on('fs.read', ($: any, e: any) => ({
@@ -44,6 +52,10 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     if (path !== '/claude/next') calls.push(`${path} ${e.init?.headers?.['x-claude-session'] ?? ''}`.trim())
     if (path === '/claude/health') {
       return state.up ? reply(200, JSON.stringify({ service: 'voice-relay', problems: [] })) : reply(502)
+    }
+    if (path === '/claude/update' && e.init?.method === 'POST') {
+      updates.push(JSON.parse(e.init.body))
+      return reply(updateReply.status, updateReply.text)
     }
     if (path === '/claude/link') {
       const body = JSON.parse(e.init.body)
@@ -70,7 +82,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     const next = path === '/claude/next' ? (replies.shift() ?? { status: 503, text: '' }) : { status: 204, text: '' }
     return reply(next.status, next.text)
   })
-  return { started, submitted, opened, linked, calls, state, context, typed, acks, ackBodies, contexts, core, replies, deliveries }
+  return { registered, updates, updateReply, started, submitted, opened, linked, calls, state, context, typed, acks, ackBodies, contexts, core, replies, deliveries }
 }
 
 function command(args: string) {
@@ -301,7 +313,6 @@ for (const mode of ['dropped rewrite', 'missing context']) {
     run.core.omitContext = mode === 'missing context'
     on('turn.start', () => ({ turnId: 'turn-1' }))
     on('turn.abort', () => ({}))
-    on('ui.log', () => ({ value: undefined }))
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
     await clock.settle()
     if (mode === 'stopped') {
@@ -322,3 +333,65 @@ for (const mode of ['dropped rewrite', 'missing context']) {
     await clock.settle()
   })
 }
+
+const voiceTool = 'mcp__voice-relay__voice_update'
+
+test('session start registers voice_update with its schema in the prompt', async ($, on) => {
+  const run = setup(on, [])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  expect(run.registered).toHaveLength(1)
+  expect(run.registered[0].name).toBe('voice_update')
+  expect(run.registered[0].isDeferred).toBe(false)
+  expect(run.registered[0].inputSchema.required).toEqual(['kind', 'text'])
+  expect(run.registered[0].inputSchema.properties.kind.enum).toEqual(['needs-you', 'milestone', 'done'])
+})
+
+test('voice_update serves outcomes, validates inputs and marks subagents', async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await clock.settle()
+  for (const outcome of ['spoken', 'queued', 'held']) {
+    run.updateReply.text = JSON.stringify({ outcome })
+    const answer = await $.tool.call({ tool: voiceTool, kind: 'milestone', text: '  A milestone landed.  ' })
+    expect(answer).toEqual({ result: outcome })
+  }
+  expect(run.updates).toEqual(Array(3).fill({ kind: 'milestone', text: 'A milestone landed.', subagent: false }))
+  for (const input of [
+    { kind: 'invalid', text: 'Hello.' },
+    { kind: 'done', text: '  ' },
+    { kind: 'needs-you', text: 'Choose.', options: ['One'] },
+    { kind: 'needs-you', text: 'Choose.', options: ['One', 2] },
+    { kind: 'needs-you', text: 'Choose.', options: ['One', 'x'.repeat(61)] },
+  ]) {
+    const answer = await $.tool.call({ tool: voiceTool, ...input })
+    expect(answer.deny).toContain('not sent:')
+  }
+  expect(run.updates).toHaveLength(3)
+  await $.tool.call({ tool: voiceTool, kind: 'milestone', text: 'Ready.', options: ['One', 'Two'] })
+  expect(run.updates[3]).toEqual({ kind: 'milestone', text: 'Ready.', subagent: false })
+  await $.tool.call({ tool: voiceTool, kind: 'needs-you', text: 'x'.repeat(201), options: ['One', 'Two'], agentId: 'worker-1' })
+  expect(run.updates[4]).toEqual({ kind: 'needs-you', text: 'x'.repeat(200), options: ['One', 'Two'], subagent: true })
+  for (const reply of [
+    { status: 502, text: '' }, { status: 0, text: '' },
+    { status: 200, text: 'invalid JSON' }, { status: 200, text: '{"outcome":"unknown"}' },
+  ]) {
+    Object.assign(run.updateReply, reply)
+    expect(await $.tool.call({ tool: voiceTool, kind: 'done', text: 'Finished.' })).toEqual({ result: 'not linked' })
+  }
+  await $.command.run(command('off'))
+  await clock.settle()
+  const sent = run.updates.length
+  const calls = run.calls.length
+  expect(await $.tool.call({ tool: voiceTool, kind: 'done', text: 'Finished.' })).toEqual({ result: 'not linked' })
+  expect(run.updates).toHaveLength(sent)
+  expect(run.calls).toHaveLength(calls)
+})
+
+test('voice_update before linking returns without HTTP', async ($, on) => {
+  const run = setup(on, [])
+  const answer = await $.tool.call({ tool: voiceTool, kind: 'done', text: 'Finished.' })
+  expect(answer).toEqual({ result: 'not linked' })
+  expect(run.updates).toEqual([])
+  expect(run.calls).toEqual([])
+})

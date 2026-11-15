@@ -39,6 +39,24 @@ export const register: Register = (on, options) => {
       description: 'Talk to this session by voice. /voice-relay settings, off, quit.',
       argumentHint: '[settings|off|quit]',
     })
+    try {
+      await $.tool.register({
+        name: 'voice_update',
+        isDeferred: false,
+        description: "Speaks one sentence into the operator's ear through the voice link. Call it only when something changes what the operator knows or must do: a milestone landed, a blocker, a finished piece, a decision only he can take. Never for routine steps. One sentence, under 25 words, plain English, no file names or commands.",
+        inputSchema: {
+          type: 'object',
+          required: ['kind', 'text'],
+          properties: {
+            kind: { type: 'string', enum: ['needs-you', 'milestone', 'done'] },
+            text: { type: 'string', maxLength: 200 },
+            options: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'string', maxLength: 60 }, description: 'Only for needs-you.' },
+          },
+        },
+      })
+    } catch {
+      $.ui.log('The voice_update tool could not be registered.')
+    }
     if (!link.on) await relink($, link, options, true)
     return started
   })
@@ -61,6 +79,29 @@ export const register: Register = (on, options) => {
     void connect($, link, options)
     return { text: `Voice link starting. The voice window opens at ${link.base}/voice.` }
   }).catch(() => ({ text: 'The voice link did not start. Run /voice-relay again.' }))
+
+  on('tool.call', { tool: 'mcp__voice-relay__voice_update' }, async ($, e) => {
+    if (!link.on) return { result: 'not linked' }
+    const input = e as Record<string, unknown>
+    const kind = input.kind
+    if (kind !== 'needs-you' && kind !== 'milestone' && kind !== 'done') return { deny: 'not sent: invalid kind' }
+    if (typeof input.text !== 'string' || input.text.trim() === '') return { deny: 'not sent: empty text' }
+    const text = input.text.trim().slice(0, 200)
+    let options: string[] | undefined
+    if (kind === 'needs-you' && input.options !== undefined) {
+      if (!Array.isArray(input.options) || input.options.length < 2 || input.options.length > 4 ||
+          !input.options.every(option => typeof option === 'string' && option.length <= 60)) {
+        return { deny: 'not sent: invalid options' }
+      }
+      options = input.options
+    }
+    const reply = await call($, link, '/claude/update', {
+      kind, text, ...(options === undefined ? {} : { options }), subagent: e.agentId !== undefined,
+    })
+    if (reply.status !== 200) return { result: 'not linked' }
+    const outcome = JSON.parse(reply.text).outcome
+    return { result: outcome === 'spoken' || outcome === 'queued' || outcome === 'held' ? outcome : 'not linked' }
+  }).catch(() => ({ result: 'not linked' }))
 
   on('session.end', async ($, e, next) => {
     if (link.on) await call($, link, '/claude/unlink', {})
@@ -255,7 +296,7 @@ async function up($: EngineInterface, link: Link): Promise<boolean> {
 }
 
 /** One bridge call: a POST with a body, else a GET. Status 0 means no answer. */
-async function call($: EngineInterface, link: Link, path: string, body?: Record<string, string | boolean>): Promise<Reply> {
+async function call($: EngineInterface, link: Link, path: string, body?: Record<string, string | boolean | string[]>): Promise<Reply> {
   link.headers ??= await headers($)
   if (link.headers === undefined) return { status: 0, text: '' }
   const init = body === undefined ? { headers: link.headers } : { method: 'POST', headers: link.headers, body: JSON.stringify(body) }
