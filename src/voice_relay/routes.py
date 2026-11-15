@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,7 @@ def mount(
     prefs = prefs if prefs is not None else Prefs()
     app.add_middleware(LocalOnly, port=port)
     shown = [-REOPEN_SECONDS]  # when the voice window last opened for a mod
+    boot = f"{int(time.time())}-{secrets.token_hex(3)}"
 
     def authorize(request: Request) -> None:
         given = request.headers.get("authorization", "")
@@ -204,6 +206,7 @@ def mount(
                 "sessions": bridge.state(),
                 "problems": len(settings.problems()),
                 "config": settings.version(),
+                "boot": boot,
             }
         )
 
@@ -222,6 +225,24 @@ def mount(
                 return Response(status_code=204)
             shown[0] = time.monotonic()
         desktop.show(f"http://{settings.HOST}:{port}{PAGES[page]}", window=page == "client")
+        return Response(status_code=204)
+
+    @app.post("/desktop/client-log")
+    async def client_log(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        event = body.get("event")
+        if not isinstance(event, str):
+            kind = type(event).__name__ if event is not None else "missing"
+            raise HTTPException(400, f"event: expected a string, got {kind}")
+        event = _client_log_field(event)
+        reason = _client_log_field(body.get("reason", ""))
+        detail = _client_log_field(body.get("detail", ""))
+        page = _client_log_field(body.get("page", ""))
+        t = body.get("t")
+        if not isinstance(t, (int, float)) or isinstance(t, bool):
+            t = None
+        logger.info("voice-page {} {} reason={} t={} {}", page, event, reason, t, detail)
         return Response(status_code=204)
 
     @app.post("/desktop/mute")
@@ -283,6 +304,10 @@ async def _body(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(400, f"body: expected a JSON object, got {type(body).__name__}")
     return body
+
+
+def _client_log_field(value: Any) -> str:
+    return str(value).replace("\n", "").replace("\r", "")[:200]
 
 
 def _text(body: dict[str, Any], field: str, default: str | None = None) -> str:

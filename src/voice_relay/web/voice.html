@@ -149,7 +149,7 @@ li.waiting { outline: 1px solid var(--waiting); }
       <div class="status" id="status" role="status">Connecting</div>
       <div class="hint" id="hint"></div>
       <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
-      <wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Turn on sound</wa-button>
+      <wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button>
     </div>
     <div>
       <h2>Claude Code sessions</h2>
@@ -186,7 +186,8 @@ const $ = id => document.getElementById(id);
 const audio = new Audio();
 let state = null, picks = {}, typed = {}, client = null, transport = null, localMicStream = null, connected = false, muted = true, speaking = false, lastAgent = null;
 let wanted = false, retryTimer = null, retryStep = 0;
-let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice;
+const PAGE_ID = Math.random().toString(36).slice(2, 8);
+let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
 let speed = 1.5, voice = "ash";
@@ -220,6 +221,9 @@ async function api(path, body, headers = { "x-voice-relay": TOKEN }) {
   return data;
 }
 const desktopApi = (path, body) => api(path, body, { authorization: `Bearer ${TOKEN}` });
+function note(event, reason = "", detail = "") {
+  desktopApi("/desktop/client-log", { event, reason, detail: String(detail).slice(0, 200), page: PAGE_ID, t: Math.round(performance.now()) }).catch(() => {});
+}
 
 /* Setup: three parts, each on an API, on this computer or on the operator's server. */
 
@@ -502,8 +506,8 @@ async function showSetup() {
 function start() {
   $("setup").classList.add("hidden");
   $("talk").classList.remove("hidden");
-  if (client) restart();
-  else connect();
+  if (client) restart("start");
+  else connect(false, "start");
 }
 
 /* Talk: the connection, the mic button, the sessions and the conversation. */
@@ -512,7 +516,8 @@ function retry() {
   if (!wanted || retryTimer !== null) return;
   show("reconnecting");
   const delay = [1, 2, 4, 8, 16, 30][Math.min(retryStep++, 5)];
-  retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay * 1000);
+  note("retry-scheduled", "", delay);
+  retryTimer = setTimeout(() => { retryTimer = null; connect(false, "retry"); }, delay * 1000);
 }
 let connecting = null, lastWake = -Infinity;
 function wake() {
@@ -521,18 +526,19 @@ function wake() {
   if (now - lastWake < 1000) return;
   lastWake = now;
   if (client) {
-    if (connected && lastPollVoice === false) restart();  // a live-looking but dead link; never cut a reconnect in progress
+    if (connected && lastPollVoice === false) restart("wake-dead-link");  // a live-looking but dead link; never cut a reconnect in progress
     return;
   }
   clearTimeout(retryTimer); retryTimer = null; retryStep = 0;
-  connect();
+  connect(false, "wake");
 }
-function restart() {
-  return connect(true);
+function restart(reason) {
+  return connect(true, reason);
 }
 
 let micGeneration = 0;
 async function releaseMic() {
+  note("mic-released");
   micGeneration++;  // cancels any takeMic() still waiting for the phone
   if (!client || !transport) return;
   try {
@@ -564,6 +570,7 @@ async function takeMic() {
     localMicStream = stream;
     await sender.replaceTrack(stream.getAudioTracks()[0]);
     client.enableMic(true);
+    note("mic-taken");
     return true;
   } catch {
     stream?.getTracks().forEach(t => t.stop());
@@ -580,14 +587,15 @@ async function muteHere() {
   await desktopApi("/desktop/mute", { muted: true }).catch(() => {});
 }
 
-function connect(replace = false) {
+function connect(replace = false, reason = "connect") {
   if (connecting) return connecting;
   // Install the guard before any connection work starts.
-  connecting = Promise.resolve().then(() => openConnection(replace)).finally(() => { connecting = null; });
+  connecting = Promise.resolve().then(() => openConnection(replace, reason)).finally(() => { connecting = null; });
   return connecting;
 }
 
-async function openConnection(replace) {
+async function openConnection(replace, reason) {
+  note("open", reason, replace ? "replace" : "");
   wanted = true;
   if (replace) {
     const previous = client;
@@ -618,6 +626,7 @@ async function openConnection(replace) {
       onBotStoppedSpeaking() { speaking = false; lastAgent = null; show(); },
       onDisconnected() {
         if (client !== attempt) return;
+        note("disconnected", reason);
         client = null; transport = null; localMicStream = null; connected = false; speaking = false;
         if (wanted) retry(); else show();
       },
@@ -629,6 +638,8 @@ async function openConnection(replace) {
     await attempt.connect({ webrtcRequestParams: { endpoint: "/api/offer" } });
     if (client !== attempt) return;
     connected = true; retryStep = 0;
+    linkBoot = undefined;
+    note("connected", reason);
     clearTimeout(retryTimer); retryTimer = null;
     if (muted) {
       await releaseMic();
@@ -636,6 +647,7 @@ async function openConnection(replace) {
     }
   } catch (error) {
     if (client !== attempt) return;
+    note("connect-failed", reason, error?.message || error);
     client = null; transport = null; localMicStream = null;
     attempt.disconnect().catch(() => {});
     $("hint").textContent = /permission|denied|notallowed/i.test(String(error)) ? "Allow the microphone for this page, then tap." : "Could not connect. Tap to try again.";
@@ -687,6 +699,8 @@ function renderSessions(sessions) {
 async function poll() {
   try {
     const now = await desktopApi("/desktop/state");
+    serverBoot = now.boot;
+    if (connected && linkBoot === undefined && serverBoot !== undefined) linkBoot = serverBoot;
     const back = pollFailCount > 0;
     pollFailCount = 0;
     lastPollVoice = now.voice;
@@ -703,11 +717,14 @@ async function poll() {
     }
     const saved = config !== undefined && now.config !== config;  // in the settings page or the file
     config = now.config;
-    if (back && connected) { voiceMismatchCount = 0; restart(); }
-    else if (saved && connected && $("setup").classList.contains("hidden")) restart();
-    else if (connected && !now.voice) {
-      if (++voiceMismatchCount >= 2) { voiceMismatchCount = 0; restart(); }
-    } else voiceMismatchCount = 0;
+    if (back && connected && linkBoot !== undefined && now.boot !== linkBoot) { voiceMismatchCount = 0; restart("server-back"); }
+    else {
+      if (back && connected) note("server-back-same-boot");
+      if (saved && connected && $("setup").classList.contains("hidden")) restart("config-saved");
+      else if (connected && !now.voice) {
+        if (++voiceMismatchCount >= 2) { voiceMismatchCount = 0; restart("voice-false"); }
+      } else voiceMismatchCount = 0;
+    }
   } catch {
     pollFailCount++;
   }
@@ -715,7 +732,7 @@ async function poll() {
 }
 
 $("mic").addEventListener("click", async () => {
-  if (!connected) { $("hint").textContent = ""; await connect(); return; }
+  if (!connected) { $("hint").textContent = ""; await connect(false, "tap"); return; }
   if (!muted) await muteHere();
   else {
     if (!(await takeMic())) return;
@@ -724,7 +741,27 @@ $("mic").addEventListener("click", async () => {
     await desktopApi("/desktop/mute", { muted: false }).catch(() => {});
   }
 });
-$("sound").addEventListener("click", () => audio.play().then(() => $("sound").classList.add("hidden")));
+let soundCtx;
+function playChime() {
+  try {
+    soundCtx ??= new AudioContext();
+    const now = soundCtx.currentTime, dur = 0.12;
+    for (const [freq, at] of [[880, 0], [1320, dur]]) {
+      const osc = soundCtx.createOscillator(), gain = soundCtx.createGain();
+      osc.type = "sine"; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, now + at);
+      gain.gain.linearRampToValueAtTime(0.15, now + at + 0.01);
+      gain.gain.linearRampToValueAtTime(0, now + at + dur);
+      osc.connect(gain).connect(soundCtx.destination);
+      osc.start(now + at); osc.stop(now + at + dur);
+    }
+  } catch { /* AudioContext unavailable */ }
+}
+$("sound").addEventListener("click", () => {
+  playChime();
+  note("sound-allowed");
+  audio.play().then(() => $("sound").classList.add("hidden"));
+});
 $("setup").addEventListener("submit", testAndStart);
 $("anyway").addEventListener("click", start);
 $("tip-close").addEventListener("click", () => $("tip").classList.add("hidden"));
@@ -733,6 +770,7 @@ $("back").addEventListener("click", event => { event.preventDefault(); $("setup"
 for (const event of ["pageshow", "focus", "online"]) addEventListener(event, wake);
 addEventListener("pagehide", () => { if (connected && !muted) void muteHere(); });
 document.addEventListener("visibilitychange", () => {
+  note(document.hidden ? "hidden" : "visible");
   if (document.hidden) { if (connected && !muted) void muteHere(); }
   else wake();
 });
@@ -748,6 +786,7 @@ for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () =>
 });
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 
+note("page-load");
 await Promise.all(["wa-button"].map(tag => customElements.whenDefined(tag)));
 state = await api("/settings/state");
 if (state.problems.length) await showSetup();
