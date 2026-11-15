@@ -729,7 +729,7 @@ class Bridge:
         lines = []
         for kinds in (
             ("waiting", "update-needs-you"),
-            ("progress", "update-milestone"),
+            ("update-milestone",),  # raw progress lines (tool calls) are never spoken
             ("answer", "update-done"),
         ):
             lines.extend(

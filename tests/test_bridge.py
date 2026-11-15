@@ -231,9 +231,9 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     text = frame.text
     assert (
         text.index("shop: approve command")
-        < text.index("shop: still working")
         < text.index("shop: finished")
     )
+    assert "still working" not in text  # raw progress lines are never spoken
     stamp = bridge_module.time.strftime("%-I:%M %p", bridge_module.time.localtime(1700000000))
     assert f"{stamp}, shop: finished" in text
     assert not bridge._missed
