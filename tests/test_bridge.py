@@ -92,10 +92,9 @@ async def test_an_answer_leaves_latest_progress_silent() -> None:
     bridge.progress(bridge.sessions["api"], "reads the log")
     assert await bridge.answer(bridge.sessions["shop"], "done")
     await asyncio.sleep(0)
-    (answer,) = worker.frames
-    assert answer.run_llm and answer.messages[0]["content"].startswith(
-        "Claude Code in shop finished"
-    )
+    context, answer = worker.frames
+    assert not context.run_llm
+    assert answer.text == "shop: done"
     assert bridge.state() == [
         {"name": "shop", "running": False, "waiting": False,
          "pending_lines": 0, "queued_updates": 0},
@@ -128,9 +127,9 @@ async def test_progress_stays_silent_after_the_reply_to_an_answer(
     assert await bridge.answer(bridge.sessions["shop"], "done")
     bridge.progress(bridge.sessions["api"], "reads the log")
     await asyncio.sleep(0.01)
-    assert len(worker.frames) == 1
+    assert len(worker.frames) == 2
     await asyncio.sleep(0.1)
-    assert len(worker.frames) == 1
+    assert len(worker.frames) == 2
     assert bridge._latest["api"][0] == "reads the log"
 
 
@@ -229,15 +228,14 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     await bridge.replay()
     assert len(worker.frames) == 2
     frame = worker.frames[1]
-    assert frame.run_llm and frame.messages[0]["role"] == "developer"
-    text = frame.messages[0]["content"]
+    text = frame.text
     assert (
         text.index("shop: approve command")
         < text.index("shop: still working")
         < text.index("shop: finished")
     )
     stamp = bridge_module.time.strftime("%-I:%M %p", bridge_module.time.localtime(1700000000))
-    assert f"{stamp} — shop: finished" in text
+    assert f"{stamp}, shop: finished" in text
     assert bridge._missed
     clock[0] += 10
     bridge.detach(worker)  # type: ignore[arg-type]
@@ -281,7 +279,7 @@ async def test_replay_retained_until_client_survives(
     await bridge.replay()
     assert bool(second.frames) is retained
     if retained:
-        assert second.frames[0].messages == worker.frames[0].messages
+        assert second.frames[0].text == worker.frames[0].text
 
 
 @pytest.mark.parametrize("connected", [True, False])
@@ -301,8 +299,7 @@ async def test_unlink_announces_once(
     assert "The last one was shop, which dropped off at" in bridge.linked_line()
     if connected:
         assert len(worker.frames) == 1
-        assert worker.frames[0].run_llm
-        assert "The shop session dropped" in worker.frames[0].messages[0]["content"]
+        assert worker.frames[0].text == "The shop session dropped off the voice link just now."
     else:
         assert len(bridge._missed) == 1
         assert bridge._missed[0][1] == "waiting"
@@ -322,7 +319,7 @@ async def test_handover_cancels_drop(connected: bool) -> None:
     await bridge.link("new", "shop", "/work/shop/.")
     await asyncio.gather(*pending, return_exceptions=True)
     assert not bridge._missed
-    assert all(not frame.run_llm for frame in worker.frames)
+    assert all(not getattr(frame, "run_llm", False) for frame in worker.frames)
 
 
 async def test_wanted_routes_persist_and_forget(
@@ -374,7 +371,9 @@ def test_missed_updates_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_answer_detail_is_only_in_detail_block() -> None:
     bridge, worker = await voiced("shop")
     assert await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
-    (frame,) = worker.frames
+    frame, spoken = worker.frames
+    assert spoken.text == "Done."
+    assert not frame.run_llm
     (message,) = frame.messages
     assert message["role"] == "developer"
     content = message["content"]
@@ -394,8 +393,8 @@ async def test_answer_catchup_contains_only_spoken_part() -> None:
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
     (frame,) = worker.frames
-    assert "shop: Done." in frame.messages[0]["content"]
-    assert "Private detail." not in frame.messages[0]["content"]
+    assert "shop: Done." in frame.text
+    assert "Private detail." not in frame.text
 
 
 async def test_stopped_answer_appends_nothing() -> None:

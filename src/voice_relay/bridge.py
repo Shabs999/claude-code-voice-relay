@@ -13,7 +13,7 @@ from typing import Any
 
 from loguru import logger
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.frames.frames import LLMMessagesAppendFrame, TTSUpdateSettingsFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame, TTSSpeakFrame, TTSUpdateSettingsFrame
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
@@ -31,11 +31,7 @@ ANSWER_SPLIT = (
     "<detail>\n{detail}\n</detail>"
 )
 STOPPED = "(The operator stopped this turn before it finished.)"  # the mod's ABORTED
-FALLBACK = (
-    '{name} is still working on your request, "{task}", with no update yet. '
-    "Say that once in one short sentence, using the operator's own words for the task. "
-    "Do not say it again for this task."
-)
+FALLBACK = "{name} is still working on {task}, no update yet."
 SPEECH_SECONDS = 90.0
 SPEECH_REFUSAL = (
     "the operator has not asked for this in the last 90 seconds; "
@@ -47,15 +43,6 @@ WAITING = "Claude Code in {name} waits at the screen for the operator to approve
 TYPED = "The operator typed this to Claude Code in {name} directly:\n\n{text}"
 LINKED = "Claude Code sessions linked now: {names}."
 QUOTE = 'The operator says, through the voice link: "{text}"'
-UPDATE_ONE = (
-    "The {name} session says, in its own words: {text}\n"
-    "Say it once, in these words or shorter, naming the session once. {options}"
-)
-UPDATE_MANY = (
-    "Session updates:\n{updates}\n"
-    "Give ONE short briefing, blocked-on-the-operator items first, then in progress, "
-    "then done, oldest first inside each group, no repetition."
-)
 UPDATE_DEDUPE_SECONDS = 600.0
 DROP_SECONDS = 20.0
 QUIET_SECONDS = 1.5
@@ -178,8 +165,11 @@ class Update:
     def choices(self) -> str:
         if not self.options:
             return ""
-        numbered = "; ".join(f"{i}: {text}" for i, text in enumerate(self.options, 1))
-        return f"Read these options numbered, one to {len(self.options)}: {numbered}"
+        numbers = ("one", "two", "three", "four", "five")
+        return " ".join(
+            f"Option {numbers[i]}: {text.rstrip('.')}."
+            for i, text in enumerate(self.options)
+        )
 
 
 class Bridge:
@@ -195,6 +185,7 @@ class Bridge:
         self._target: Session | None = None
         self._acted = False
         self._relay = False
+        self._gag = False
         self.quiet_seconds = 15.0 * 60
         self._catchup_seconds = settings.catchup_seconds()
         self._worker: PipelineWorker | None = None
@@ -264,7 +255,7 @@ class Bridge:
         return items
 
     async def _deliver_catchup(self, items: deque) -> bool:
-        if not await self._append(self._briefing(items)):
+        if not await self.say(self._briefing(items)):
             self._missed.extendleft(reversed(items))
             return False
         return True
@@ -289,19 +280,22 @@ class Bridge:
             return
         when = (time.strftime("%-I:%M %p", time.localtime(time.time() + minutes * 60))
                 if minutes else "")
-        await params.result_callback(
-            f"holding until {when}" if when else "holding until you say stop"
-        )
+        message = f"holding until {when}" if when else "holding until you say stop"
+        await self.say(message)
+        self._gag = True
+        await params.result_callback(message + " Say nothing.")
 
     async def _resume_updates(self, params: FunctionCallParams) -> None:
         released = await self.release()
-        await params.result_callback(
-            "released, catch-up coming" if released else "nothing was held"
-        )
+        message = "released, catch-up coming" if released else "nothing was held"
+        await self.say(message)
+        self._gag = True
+        await params.result_callback(message + " Say nothing.")
 
     def operator_said(self, text: str) -> None:
         if not text.strip():
             return
+        self._gag = False
         self._spoke_at = time.monotonic()
         now = time.time()
         if self._join and self._exchange and now - self._fragment_at < 20:
@@ -433,7 +427,7 @@ class Bridge:
             pending.cancel()
         if new and self._worker is not None:
             session.want_history()
-            await self._append(self.linked_line(), run=False)
+            await self.say(self.linked_line())
         if new:
             self.sessions.release(session)
         return session.name
@@ -454,9 +448,8 @@ class Bridge:
         try:
             await asyncio.sleep(DROP_SECONDS)
             when = time.strftime("%-I:%M %p", time.localtime(dropped))
-            await self._append(
-                f"The {session.name} session dropped off the voice link just now. "
-                "Say so once in a short sentence; do not pretend it was never linked.",
+            await self.say(
+                f"The {session.name} session dropped off the voice link just now.",
                 missed=(
                     "waiting",
                     session.name,
@@ -527,27 +520,25 @@ class Bridge:
             if self.held():
                 return
             items, self._updates = self._updates, []
-            if len(items) < 3:
-                content = "\n\n".join(UPDATE_ONE.format(
-                    name=item.session.name, text=item.words(), options=item.choices()
-                ) for item in items)
-            else:
+            if len(items) >= 3:
                 order = {"needs-you": 0, "milestone": 1, "done": 2}
                 items.sort(key=lambda item: (order[item.kind], item.at))
-                content = UPDATE_MANY.format(updates="\n".join(
-                    f"{item.session.name} ({item.kind}): {item.words()} {item.choices()}"
-                    for item in items
+            content = " ".join(
+                self._named(item.session, item.words() + (
+                    "." if len(items) > 1 and not item.words().endswith((".", "?", "!")) else ""
                 ))
-            if not await self._append(content):
+                + (" " + item.choices() if item.choices() else "") for item in items
+            )
+            if not await self.say(content):
                 for item in items:
                     self._remember_update(item)
 
     async def history(self, session: Session, text: str) -> bool:
-        return await self._append(HISTORY.format(name=session.name, history=text), run=False)
+        return await self._append(HISTORY.format(name=session.name, history=text))
 
     async def typed(self, session: Session, text: str) -> bool:
         session.running = True
-        return await self._append(TYPED.format(name=session.name, text=text), run=False)
+        return await self._append(TYPED.format(name=session.name, text=text))
 
     async def answer(self, session: Session, text: str) -> bool:
         stopped, restarting = session.stopping and text == STOPPED, session.restarting
@@ -571,11 +562,12 @@ class Bridge:
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
             if detail else ANSWER.format(name=session.name, answer=spoken)
         )
+        await self._append(content)
         if self.held():
             self._remember("answer", session.name, spoken)
             return False
-        return await self._append(
-            content, missed=("answer", session.name, spoken)
+        return await self.say(
+            self._named(session, spoken), missed=("answer", session.name, spoken)
         )
 
     async def waiting(self, session: Session, action: str) -> bool:
@@ -584,8 +576,9 @@ class Bridge:
         if self.held():
             self._remember("waiting", session.name, action)
             return False
-        return await self._append(
-            WAITING.format(name=session.name, action=action),
+        await self._append(WAITING.format(name=session.name, action=action))
+        return await self.say(
+            f"{session.name} waits for your OK at the screen to {action}.",
             missed=("waiting", session.name, action),
         )
 
@@ -607,7 +600,9 @@ class Bridge:
         found.reminded = False
         found.send(TASK, QUOTE.format(text=found.asked_text))
         after = ", Claude Code starts it after the current turn" if busy else ""
-        await params.result_callback(f"sent to {found.name}{after}")
+        await self.say("Sent.")
+        self._gag = True
+        await params.result_callback(f"sent to {found.name}{after} Say nothing.")
 
     async def _abort(self, params: FunctionCallParams) -> None:
         then = str(params.arguments.get("then") or "").strip()
@@ -631,7 +626,9 @@ class Bridge:
             found.running = found.restarting = True
             found.send(TASK, QUOTE.format(text=then))
         sent = ", and the new instructions after it" if then else ""
-        await params.result_callback(f"abort sent to {found.name}{sent}")
+        await self.say("Stopped, and sent." if then else "Stopped.")
+        self._gag = True
+        await params.result_callback(f"abort sent to {found.name}{sent} Say nothing.")
 
     async def _open_session(self, params: FunctionCallParams) -> None:
         name = str(params.arguments.get("folder") or "")
@@ -659,7 +656,9 @@ class Bridge:
         held = " The task goes to it once it links." if task else ""
         opened = OPENED.format(folder=folder.name, what=RESUMED if resume else "Claude Code")
         trust = "" if terminal.trusted(folder) else UNTRUSTED
-        await params.result_callback(opened + trust + held)
+        await self.say(f"Opening {folder.name}.")
+        self._gag = True
+        await params.result_callback(opened + trust + held + " Say nothing.")
 
     def _roots(self) -> list[Path]:
         projects = settings.environment().get("VOICE_RELAY_PROJECTS", "").strip()
@@ -682,7 +681,7 @@ class Bridge:
                         or time.monotonic() - asked_at < self.quiet_seconds
                         or session not in self.sessions.all()):
                     continue
-                if await self._append(FALLBACK.format(
+                if await self.say(FALLBACK.format(
                     name=session.name, task=session.asked_text, minutes=self.quiet_seconds / 60
                 )):
                     session.reminded = True
@@ -700,7 +699,7 @@ class Bridge:
         """Appends from sync code; the set holds each task until it ends."""
         if self._worker is None:
             return
-        task = asyncio.create_task(self._append(content, run=False))
+        task = asyncio.create_task(self.say(content))
         self._notices.add(task)
         task.add_done_callback(self._notices.discard)
 
@@ -727,27 +726,22 @@ class Bridge:
                              time.time() if wall is None else wall))
 
     def _briefing(self, items: Any) -> str:
-        lines = ["While the operator was away or holding updates, these arrived "
-                 "(oldest first, briefing order):"]
-        for kinds, label in (
-            (("waiting", "update-needs-you"), "Approvals and decisions waiting on the operator"),
-            (("progress", "update-milestone"), "Progress (in progress)"),
-            (("answer", "update-done"), "Answers (finished)"),
+        lines = []
+        for kinds in (
+            ("waiting", "update-needs-you"),
+            ("progress", "update-milestone"),
+            ("answer", "update-done"),
         ):
-            group = [
-                f"{time.strftime('%-I:%M %p', time.localtime(wall))} — {name}: {text}"
-                for _, k, name, text, wall in sorted(items, key=lambda item: item[4])
-                if k in kinds
-            ]
-            if group:
-                lines.extend([label + ":", *group])
-        lines.append(
-            "Give ONE short catch-up: blocked-on-operator first, then in progress, then done, "
-            "no repetition. If there are more than eight items, give the blocked-on-operator "
-            "items one by one, then ONE sentence each for in-progress and done, grouped by "
-            "project, oldest first; never list more than ten lines aloud."
-        )
-        return "\n".join(lines)
+            lines.extend(
+                f"{time.strftime('%-I:%M %p', time.localtime(wall))}, {name}: "
+                f"{text.rstrip('.')}."
+                for _, kind, name, text, wall in sorted(items, key=lambda item: item[4])
+                if kind in kinds
+            )
+        spoken = "While you were away: " + " ".join(lines[:10])
+        if len(lines) > 10:
+            spoken += f" and {len(lines) - 10} more in the transcript."
+        return spoken
 
     async def replay(self) -> None:
         """Called after the client-ready greeting has been queued."""
@@ -758,7 +752,7 @@ class Bridge:
         replayed = time.monotonic()
         self._replayed_at = replayed
         self._replayed_worker = self._worker
-        if await self._append(self._briefing(self._missed)):
+        if await self.say(self._briefing(self._missed)):
             self._missed = deque(
                 (item for item in self._missed
                  if not (item[1].startswith("update-") and item[0] <= replayed)),
@@ -771,18 +765,27 @@ class Bridge:
                 TTSUpdateSettingsFrame(settings={"voice": voice, "speed": speed})
             )
 
-    async def _append(
-        self, content: str, *, run: bool = True, missed: tuple[str, str, str] | None = None
-    ) -> bool:
-        # Link notices bypass holds; session content is held at its entry points.
+    def gagged(self) -> bool:
+        return self._gag
+
+    def _named(self, session: Session, text: str) -> str:
+        return f"{session.name}: {text}" if len(self.sessions.all()) > 1 else text
+
+    async def say(self, text: str, *, missed: tuple[str, str, str] | None = None) -> bool:
         worker = self._worker
         if worker is None:
             if missed is not None:
                 self._remember(*missed)
             return False
+        # Server speech is session content, never a Dispatcher record: SpokenReply
+        # records only LLMTextFrame. TTS commits this text to assistant context itself.
+        await worker.queue_frame(TTSSpeakFrame(text))
+        return True
+
+    async def _append(self, content: str) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
         message: Any = {"role": DEVELOPER, "content": content}
-        if run:
-            self._relay = True
-            self._asked = time.monotonic()
-        await worker.queue_frame(LLMMessagesAppendFrame(messages=[message], run_llm=run))
+        await worker.queue_frame(LLMMessagesAppendFrame(messages=[message], run_llm=False))
         return True

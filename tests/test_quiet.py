@@ -56,14 +56,14 @@ async def test_voice_task_gets_one_reminder_and_next_task_rearms(fast_reminder):
             session = bridge.sessions["shop"]
             assert session.asked_text == task and not session.reminded
             await asyncio.sleep(0.04)
-            assert worker.frames[-1].messages[0]["content"] == FALLBACK.format(
+            assert worker.frames[-1].text == FALLBACK.format(
                 name="shop", task=task
             )
             count = len(worker.frames)
             await asyncio.sleep(0.03)
             assert len(worker.frames) == count
             assert session.reminded
-        assert len(worker.frames) == 2
+        assert len(worker.frames) == 4
     finally:
         bridge.detach(worker)
 
@@ -88,7 +88,7 @@ async def test_no_reminder_without_an_unreported_voice_task(fast_reminder, news)
             else:
                 bridge.quiet_seconds = 0
         await asyncio.sleep(0.05)
-        assert not any("no update yet" in f.messages[0]["content"] for f in worker.frames)
+        assert not any("no update yet" in getattr(f, "text", "") for f in worker.frames)
         assert not session.reminded
     finally:
         bridge.detach(worker)
@@ -111,7 +111,7 @@ async def test_news_during_quiet_wait_cancels_reminder(fast_reminder, monkeypatc
         await bridge.answer(bridge.sessions["shop"], "done")
         release.set()
         await asyncio.sleep(0.03)
-        assert len(worker.frames) == 1
+        assert len(worker.frames) == 3
     finally:
         bridge.detach(worker)
 
@@ -142,6 +142,6 @@ async def test_open_session_held_task_does_not_arm_reminder(fast_reminder, tmp_p
         assert session.running and session.asked_at is None
         await asyncio.sleep(0.03)
         assert not session.reminded
-        assert not any("no update yet" in f.messages[0]["content"] for f in worker.frames)
+        assert not any("no update yet" in getattr(f, "text", "") for f in worker.frames)
     finally:
         bridge.detach(worker)

@@ -8,7 +8,6 @@ from dataclasses import replace
 
 from loguru import logger
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -20,7 +19,7 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.workers.runner import WorkerRunner
 
 from . import desktop, routes, services, settings, web
-from .bridge import DEVELOPER, TOOLS, Bridge
+from .bridge import TOOLS, Bridge
 from .processors import Microphone, MuteGate, Preamble, SpokenReply
 
 IDLE_SECONDS = 3600.0  # a Claude Code turn can run for minutes in silence
@@ -79,8 +78,7 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     @worker.rtvi.event_handler("on_client_ready")
     async def _on_client_ready(rtvi: object) -> None:
-        greeting = {"role": DEVELOPER, "content": f"{current.greeting}\n{BRIDGE.linked_line()}"}
-        await worker.queue_frame(LLMMessagesAppendFrame(messages=[greeting], run_llm=True))
+        await BRIDGE.say(f"{current.greeting} {BRIDGE.linked_line()}")
         await BRIDGE.replay()
 
     @transport.event_handler("on_client_disconnected")

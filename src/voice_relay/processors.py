@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from loguru import logger
 from pipecat.frames.frames import (
     Frame,
     FunctionCallsStartedFrame,
@@ -85,6 +86,7 @@ class SpokenReply(FrameProcessor):
     def __init__(self, bridge) -> None:
         super().__init__()
         self._bridge = bridge
+        self._dropped = False
         self._parts: list[str] = []
         self._active = False
         self._tool = False
@@ -92,7 +94,13 @@ class SpokenReply(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if direction is FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMTextFrame) and self._bridge.gagged():
+                if not self._dropped:
+                    logger.debug("Dropped gagged Dispatcher response")
+                    self._dropped = True
+                return
             if isinstance(frame, LLMFullResponseStartFrame):
+                self._dropped = False
                 self._parts, self._active, self._tool = [], True, False
             elif isinstance(frame, LLMTextFrame) and self._active:
                 self._parts.append(frame.text)
@@ -111,6 +119,6 @@ class SpokenReply(FrameProcessor):
         text = "".join(self._parts).strip()
         if text:
             self._bridge.dispatcher_said(text, cut=cut)
-        elif not self._tool:
+        elif not self._tool and not self._dropped:
             self._bridge.dispatcher_silent()
         self._parts, self._active = [], False

@@ -34,11 +34,12 @@ def bridge(monkeypatch: pytest.MonkeyPatch) -> Bridge:
 
 
 def content(worker: Worker) -> str:
-    assert len(worker.frames) == 1
-    frame = worker.frames[0]
-    assert frame.run_llm
-    assert frame.messages[0]["role"] == "developer"
-    return frame.messages[0]["content"]
+    from pipecat.frames.frames import TTSSpeakFrame
+
+    frames = [frame for frame in worker.frames if isinstance(frame, TTSSpeakFrame)]
+    assert len(frames) == 1
+    assert all(not getattr(frame, "run_llm", False) for frame in worker.frames)
+    return frames[0].text
 
 
 async def test_live_update_and_options(bridge: Bridge) -> None:
@@ -52,7 +53,7 @@ async def test_live_update_and_options(bridge: Bridge) -> None:
     message = content(worker)
     assert message.count("shop") == 1
     assert "Choose a color" in message
-    assert "one to 3: 1: red; 2: blue; 3: green" in message
+    assert "Option one: red. Option two: blue. Option three: green." in message
     assert session.waiting and session.running
     assert not bridge._missed
     assert session.record.pending_lines == 0
@@ -90,7 +91,7 @@ async def test_three_updates_one_briefing(bridge: Bridge) -> None:
     await bridge.update(session, "needs-you", "question", None, False)
     await bridge._speaker
     message = content(worker)
-    assert "Give ONE short briefing" in message
+    assert "Session updates:" not in message
     assert message.index("question") < message.index("working") < message.index("finished")
 
 
@@ -105,7 +106,7 @@ async def test_two_updates_and_helpers(bridge: Bridge) -> None:
     message = content(worker)
     assert "helper old" not in message
     assert "helper new (a helper inside that session)" in message
-    assert message.count("session says, in its own words") == 2
+    assert message.count("shop:") == 2
 
 
 async def test_catchup_two_sessions_and_approval(bridge: Bridge) -> None:
@@ -271,8 +272,8 @@ async def test_live_answer_supersedes_unspoken_updates(bridge: Bridge) -> None:
     assert "finished answer" in content(worker)
     bridge._quiet.set()
     await bridge._speaker
-    assert len(worker.frames) == 2
-    message = worker.frames[1].messages[0]["content"]
+    assert len(worker.frames) == 3
+    message = worker.frames[2].text
     assert "keep question" in message
     assert "old done" not in message and "old milestone" not in message
 

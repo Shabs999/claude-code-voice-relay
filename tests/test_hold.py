@@ -47,7 +47,8 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
     await bridge.waiting(session, "approve command")
     await bridge.update(session, "needs-you", "choose branch", ["a", "b"], False)
     await bridge.answer(session, "brief answer\n---\nprivate detail")
-    assert not worker.frames
+    assert len(worker.frames) == 1 and not worker.frames[0].run_llm
+    worker.frames.clear()
     if timer:
         now[0] += 3600
         await bridge._hold_timer
@@ -55,7 +56,7 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
         assert await bridge.release()
     assert not bridge.held()
     assert len(worker.frames) == 1
-    text = worker.frames[0].messages[0]["content"]
+    text = worker.frames[0].text
     words = ["choose branch", "brief answer"]
     assert [text.index(word) for word in words] == sorted(text.index(word) for word in words)
     assert all(text.count(word) == 1 for word in words)
@@ -75,14 +76,14 @@ async def test_pending_no_worker_and_link_notice(bridge):
     await bridge.hold(None)
     await bridge.link("two", "two", "")
     assert len(worker.frames) == 1
-    assert "sessions linked now" in worker.frames[0].messages[0]["content"]
+    assert "sessions linked now" in worker.frames[0].text
     bridge._worker = None
     await bridge.release()
     assert len(bridge._missed) == 1
     bridge._worker = worker
     await bridge.replay()
     assert len(worker.frames) == 2
-    assert "pending work" in worker.frames[1].messages[0]["content"]
+    assert "pending work" in worker.frames[1].text
     bridge._speaker.cancel()
 
 
@@ -100,11 +101,11 @@ async def test_tools(bridge):
     callback.assert_awaited_with("not held: minutes must be a number")
     params.arguments = {}
     await bridge._hold_updates(params)
-    callback.assert_awaited_with("holding until you say stop")
+    callback.assert_awaited_with("holding until you say stop Say nothing.")
     await bridge._resume_updates(params)
-    callback.assert_awaited_with("released, catch-up coming")
+    callback.assert_awaited_with("released, catch-up coming Say nothing.")
     await bridge._resume_updates(params)
-    callback.assert_awaited_with("nothing was held")
+    callback.assert_awaited_with("nothing was held Say nothing.")
 
 
 async def test_hold_route(bridge, monkeypatch):

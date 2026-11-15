@@ -61,6 +61,7 @@ async def test_spoken_reply_capture() -> None:
     from voice_relay.processors import SpokenReply
 
     bridge = Mock()
+    bridge.gagged.return_value = False
     processor = SpokenReply(bridge)
     processor.push_frame = AsyncMock()
     processor._start_interruption = AsyncMock()
