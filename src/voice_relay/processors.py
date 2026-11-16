@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import time
 
 from loguru import logger
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     Frame,
     FunctionCallsStartedFrame,
     InputAudioRawFrame,
@@ -14,12 +16,59 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     LLMTextFrame,
     UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from .record import FILLER_PATTERN
 
 LONG_CHARS = 300  # a preamble is shorter, a long answer streams after this
+
+
+class OperatorActivity:
+    """Operator voice activity from the pipeline, for server-speech gating."""
+
+    def __init__(self) -> None:
+        self.speaking = False
+        self.stopped_at: float | None = None
+
+    def started(self) -> None:
+        self.speaking = True
+
+    def stopped(self) -> None:
+        self.speaking = False
+        self.stopped_at = time.monotonic()
+
+
+class OperatorVoice(FrameProcessor):
+    """Notifies the bridge when the operator starts or stops speaking."""
+
+    def __init__(self, bridge) -> None:
+        super().__init__()
+        self._bridge = bridge
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, UserStartedSpeakingFrame):
+            self._bridge.operator.started()
+            self._bridge.operator_voice_started()
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            self._bridge.operator.stopped()
+        await self.push_frame(frame, direction)
+
+
+class ServerSpeechWatch(FrameProcessor):
+    """Signals when a server TTSSpeakFrame finishes playing."""
+
+    def __init__(self, bridge) -> None:
+        super().__init__()
+        self._bridge = bridge
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if direction is FrameDirection.UPSTREAM and isinstance(frame, BotStoppedSpeakingFrame):
+            self._bridge.server_speech_stopped()
+        await self.push_frame(frame, direction)
 
 
 class Microphone:

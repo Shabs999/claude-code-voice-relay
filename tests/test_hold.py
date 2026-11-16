@@ -13,20 +13,13 @@ from voice_relay import routes, settings
 from voice_relay.bridge import Bridge
 from voice_relay.processors import Microphone
 
-
-class Worker:
-    turn_tracking_observer = None
-
-    def __init__(self):
-        self.frames = []
-
-    async def queue_frame(self, frame):
-        self.frames.append(frame)
+from test_bridge import Worker, flush_speech
 
 
 @pytest.fixture
 def bridge(monkeypatch):
     monkeypatch.setattr(module, "QUIET_SECONDS", 0)
+    monkeypatch.setattr(module, "OPERATOR_PAUSE_SECONDS", 0)
     monkeypatch.setattr(module, "REPLY_SECONDS", 0)
     result = Bridge(interval=0)
     result.sessions.link("one", "one", "")
@@ -35,7 +28,7 @@ def bridge(monkeypatch):
 
 @pytest.mark.parametrize("timer", [False, True])
 async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     now = [100.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
@@ -54,6 +47,7 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
         await bridge._hold_timer
     else:
         assert await bridge.release()
+    await flush_speech(bridge)
     assert not bridge.held()
     assert len(worker.frames) == 1
     text = worker.frames[0].text
@@ -64,20 +58,23 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
     assert "private detail" not in text
     assert not await bridge.release()
     await bridge.replay()
+    await flush_speech(bridge)
     assert len(worker.frames) == 1
 
 
 async def test_pending_no_worker_and_link_notice(bridge):
     bridge = Bridge(interval=0, linked_delay=0)
     bridge.sessions.link("one", "one", "")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     bridge._quiet.clear()
     session = bridge.sessions["one"]
     await bridge.update(session, "milestone", "pending work", None, False)
     await bridge.hold(None)
     await bridge.link("two", "two", "")
+    bridge._quiet.set()
     await bridge._linked_task
+    await flush_speech(bridge)
     assert len(worker.frames) == 1
     assert "sessions linked now" in worker.frames[0].text
     bridge._worker = None
@@ -85,6 +82,7 @@ async def test_pending_no_worker_and_link_notice(bridge):
     assert len(bridge._missed) == 1
     bridge._worker = worker
     await bridge.replay()
+    await flush_speech(bridge)
     assert len(worker.frames) == 2
     assert "pending work" in worker.frames[1].text
     bridge._speaker.cancel()
@@ -139,7 +137,7 @@ async def test_hold_route(bridge, monkeypatch):
 
 
 async def test_expiry_and_replacement_timer(bridge, monkeypatch):
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     now = [100.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
@@ -153,12 +151,13 @@ async def test_expiry_and_replacement_timer(bridge, monkeypatch):
     assert not bridge.held()
     assert not bridge.held()
     await asyncio.sleep(0)
+    await flush_speech(bridge)
     assert len(worker.frames) == 1
     assert not await bridge.release()
 
 
 async def test_hold_blocks_pending_speaker_and_fallback(bridge, monkeypatch):
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     session = bridge.sessions["one"]
     bridge._quiet.clear()
@@ -177,4 +176,5 @@ async def test_hold_blocks_pending_speaker_and_fallback(bridge, monkeypatch):
     assert not worker.frames and not session.reminded
     fallback.cancel()
     await bridge.release()
+    await flush_speech(bridge)
     assert len(worker.frames) == 1

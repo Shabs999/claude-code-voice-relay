@@ -13,19 +13,23 @@ from voice_relay.bridge import Bridge
 from voice_relay.processors import Microphone
 
 
-class Worker:
-    turn_tracking_observer = None
+from test_bridge import Worker as TestWorker, flush_speech
 
-    def __init__(self) -> None:
-        self.frames: list[Any] = []
 
-    async def queue_frame(self, frame: Any) -> None:
-        self.frames.append(frame)
+class Worker(TestWorker):
+    pass
+
+
+async def spoke(bridge: Bridge) -> None:
+    if bridge._speaker is not None:
+        await bridge._speaker
+    await flush_speech(bridge)
 
 
 @pytest.fixture
 def bridge(monkeypatch: pytest.MonkeyPatch) -> Bridge:
     monkeypatch.setattr(bridge_module, "QUIET_SECONDS", 0)
+    monkeypatch.setattr(bridge_module, "OPERATOR_PAUSE_SECONDS", 0)
     monkeypatch.setattr(bridge_module, "REPLY_SECONDS", 0)
     result = Bridge(interval=0)
     result.sessions.link("shop", "shop", "")
@@ -43,13 +47,13 @@ def content(worker: Worker) -> str:
 
 
 async def test_live_update_and_options(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     session = bridge.sessions["shop"]
     session.running = True
     assert await bridge.update(session, "needs-you", "Choose a color", ["red", "blue", "green"],
                                False) == "spoken"
-    await bridge._speaker
+    await spoke(bridge)
     message = content(worker)
     assert message.count("shop") == 1
     assert "Choose a color" in message
@@ -60,7 +64,7 @@ async def test_live_update_and_options(bridge: Bridge) -> None:
 
 
 async def test_duplicates_and_pending_replacement(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     bridge._quiet.clear()
     session = bridge.sessions["shop"]
@@ -74,7 +78,7 @@ async def test_duplicates_and_pending_replacement(bridge: Bridge) -> None:
     ]
     assert bridge.state()[0]["queued_updates"] == 4
     bridge._quiet.set()
-    await bridge._speaker
+    await spoke(bridge)
     message = content(worker)
     assert "(milestone): old" not in message
     assert message.index("first question") < message.index("second question")
@@ -83,26 +87,26 @@ async def test_duplicates_and_pending_replacement(bridge: Bridge) -> None:
 
 
 async def test_three_updates_one_briefing(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     session = bridge.sessions["shop"]
     await bridge.update(session, "done", "finished", None, False)
     await bridge.update(session, "milestone", "working", None, False)
     await bridge.update(session, "needs-you", "question", None, False)
-    await bridge._speaker
+    await spoke(bridge)
     message = content(worker)
     assert "Session updates:" not in message
     assert message.index("question") < message.index("working") < message.index("finished")
 
 
 async def test_two_updates_and_helpers(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     session = bridge.sessions["shop"]
     await bridge.update(session, "done", "helper old", None, True)
     await bridge.update(session, "milestone", "helper new", None, True)
     await bridge.update(session, "done", "parent done", None, False)
-    await bridge._speaker
+    await spoke(bridge)
     message = content(worker)
     assert "helper old" not in message
     assert "helper new (a helper inside that session)" in message
@@ -118,10 +122,11 @@ async def test_catchup_two_sessions_and_approval(bridge: Bridge) -> None:
         (api, "done", "api finished"),
     ):
         assert await bridge.update(session, kind, text, None, False) == "queued"
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
     await bridge.replay()
+    await spoke(bridge)
     message = content(worker)
     words = ["approve command", "shop question", "api working", "shop working",
              "shop finished", "api finished"]
@@ -139,23 +144,23 @@ async def test_duplicate_window_and_original_outcome(
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: now[0])
     session = bridge.sessions["shop"]
     assert await bridge.update(session, "done", "same", None, False) == "queued"
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     assert await bridge.update(session, "done", "same", None, False) == "queued"
     assert not bridge._updates
     now[0] += 601
     assert await bridge.update(session, "done", "same", None, False) == "spoken"
-    await bridge._speaker
+    await spoke(bridge)
 
 
 async def test_disconnect_before_quiet_saves_catchup(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     bridge._quiet.clear()
     await bridge.update(bridge.sessions["shop"], "needs-you", "question", None, False)
     await asyncio.sleep(0)
     bridge.detach(worker)  # type: ignore[arg-type]
-    await bridge._speaker
+    await spoke(bridge)
     assert not worker.frames
     assert bridge._missed[0][1:4] == ("update-needs-you", "shop", "question")
 
@@ -195,14 +200,14 @@ async def test_route_validation_clipping_and_state(bridge: Bridge) -> None:
 
 
 async def test_updates_wait_until_quiet(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     bridge._quiet.clear()
     await bridge.update(bridge.sessions["shop"], "done", "finished", None, False)
     await asyncio.sleep(0)
     assert not worker.frames
     bridge._quiet.set()
-    await bridge._speaker
+    await spoke(bridge)
     assert "finished" in content(worker)
 
 
@@ -236,9 +241,10 @@ async def test_answers_replace_stale_catchup(bridge: Bridge) -> None:
     await bridge.update(session, "needs-you", "keep question", None, False)
     for text in ("first answer", "second answer", "last answer"):
         assert not await bridge.answer(session, text)
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
+    await spoke(bridge)
     message = content(worker)
     assert "last answer" in message and "keep question" in message
     for stale in ("old progress", "old approval", "old milestone", "old done",
@@ -249,15 +255,16 @@ async def test_answers_replace_stale_catchup(bridge: Bridge) -> None:
 async def test_missed_answers_keep_session_order(bridge: Bridge) -> None:
     await bridge.answer(bridge.sessions["shop"], "shop answer")
     await bridge.answer(bridge.sessions["api"], "api answer")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
+    await spoke(bridge)
     message = content(worker)
     assert message.index("shop answer") < message.index("api answer")
 
 
 async def test_live_answer_supersedes_unspoken_updates(bridge: Bridge) -> None:
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     bridge._quiet.clear()
     session = bridge.sessions["shop"]
@@ -269,9 +276,10 @@ async def test_live_answer_supersedes_unspoken_updates(bridge: Bridge) -> None:
     assert await bridge.answer(session, "finished answer")
     assert session.asked_at is None
     assert [item.kind for item in bridge._updates] == ["needs-you"]
-    assert "finished answer" in content(worker)
     bridge._quiet.set()
-    await bridge._speaker
+    await flush_speech(bridge)
+    assert any("finished answer" in getattr(f, "text", "") for f in worker.frames)
+    await spoke(bridge)
     assert len(worker.frames) == 3
     message = worker.frames[2].text
     assert "keep question" in message

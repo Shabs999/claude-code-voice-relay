@@ -20,7 +20,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from . import desktop, routes, services, settings, web
 from .bridge import TOOLS, Bridge
-from .processors import Microphone, MuteGate, Preamble, SpokenReply
+from .processors import Microphone, MuteGate, OperatorVoice, Preamble, ServerSpeechWatch, SpokenReply
 
 IDLE_SECONDS = 3600.0  # a Claude Code turn can run for minutes in silence
 POLL_SECONDS = 25.0  # under the 30 s limit of a mod's HTTP call
@@ -60,12 +60,14 @@ async def bot(runner_args: RunnerArguments) -> None:
         [
             transport.input(),
             MuteGate(MICROPHONE),
+            OperatorVoice(BRIDGE),
             services.stt(current.stt),
             user,
             llm,
             Preamble(),
             SpokenReply(BRIDGE),
             services.tts(current.tts, speed=current.speed),
+            ServerSpeechWatch(BRIDGE),
             transport.output(),
             assistant,
         ]

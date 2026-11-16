@@ -10,7 +10,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 
-from test_bridge import Call, Worker
+from test_bridge import Call, Worker, flush_speech
 from voice_relay.bridge import Bridge
 from voice_relay.processors import Preamble, SpokenReply
 
@@ -21,9 +21,10 @@ async def test_answer_speaks_only_brief_and_keeps_detail(second):
     session, _ = bridge.sessions.link("shop", "shop", "")
     if second:
         bridge.sessions.link("api", "api", "")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     await bridge.answer(session, "Done.\n---\n" + "Detail. " * 100)
+    await flush_speech(bridge)
     speech = [f for f in worker.frames if isinstance(f, TTSSpeakFrame)]
     assert len(speech) == 1
     assert speech[0].text == ("shop: Done." if second else "Done.")
@@ -35,11 +36,12 @@ async def test_answer_speaks_only_brief_and_keeps_detail(second):
 async def test_send_confirmation_gags_until_operator_speaks():
     bridge = Bridge(interval=0)
     bridge.sessions.link("shop", "shop", "")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     bridge.operator_said("run tests")
     call = Call(text="run tests")
     await bridge._send_task(call)
+    await flush_speech(bridge)
     assert [f.text for f in worker.frames] == ["Sent."]
     assert call.result.endswith(" Say nothing.")
     assert bridge.gagged()
@@ -75,10 +77,11 @@ async def test_gag_drops_only_llm_text(gag):
 
 async def test_say_never_records_dispatcher_and_preamble_preserves_it():
     bridge = Bridge(interval=0)
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     bridge.dispatcher_said = Mock()
     assert await bridge.say("Exact words.")
+    await flush_speech(bridge)
     frame, = worker.frames
     assert frame.text == "Exact words." and frame.append_to_context
     preamble = Preamble()
@@ -102,10 +105,11 @@ async def test_catchup_cap_order_and_no_repeat():
     for i in range(12):
         bridge._remember("answer", f"project{i}", f"result {i}")
     bridge._remember("waiting", "blocked", "approve it")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge._worker = worker
     await bridge.replay()
     await bridge.replay()
+    await flush_speech(bridge)
     frame, = worker.frames
     assert frame.text.startswith("While you were away: ")
     assert frame.text.index("approve it") < frame.text.index("result 0")

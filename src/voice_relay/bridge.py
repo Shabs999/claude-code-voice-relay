@@ -7,7 +7,7 @@ import asyncio
 import re
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +18,7 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
+from .processors import OperatorActivity
 from .record import Line, filler
 from .sessions import ABORT, TASK, Session, Sessions, key
 
@@ -46,6 +47,7 @@ QUOTE = 'The operator says, through the voice link: "{text}"'
 UPDATE_DEDUPE_SECONDS = 600.0
 DROP_SECONDS = 20.0
 QUIET_SECONDS = 1.5
+OPERATOR_PAUSE_SECONDS = 2.5
 REPLY_SECONDS = 4.0  # a message that runs the LLM: its spoken reply starts within this time
 RESUMED = "Claude Code and its last conversation"
 OPENED = "opened a new terminal with {what} in {folder}. It links in a few seconds as {folder}."
@@ -149,6 +151,14 @@ def split_answer(text: str) -> tuple[str, str]:
 
 
 @dataclass
+class _SpeechItem:
+    text: str
+    missed: tuple[str, str, str] | None = None
+    append_to_context: bool = True
+    interrupts: int = 0
+
+
+@dataclass
 class Update:
     session: Session
     kind: str
@@ -209,6 +219,12 @@ class Bridge:
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
+        self.operator = OperatorActivity()
+        self._speech: deque[_SpeechItem] = deque()
+        self._speech_task: asyncio.Task[None] | None = None
+        self._current_speech: _SpeechItem | None = None
+        self._speech_done: asyncio.Event | None = None
+        self._speech_dropped = False
 
     def held(self) -> bool:
         if self._hold_until is None:
@@ -359,6 +375,8 @@ class Bridge:
 
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
+        self.operator.speaking = False
+        self.operator.stopped_at = None
         self._linked_said = None
         if self._fallback is not None:
             self._fallback.cancel()
@@ -396,6 +414,12 @@ class Bridge:
             if self._linked_task is not None:
                 self._linked_task.cancel()
                 self._linked_task = None
+            self._stash_speech_missed()
+            if self._speech_task is not None:
+                self._speech_task.cancel()
+                self._speech_task = None
+            self._speech.clear()
+            self._current_speech = None
 
     def voice(self) -> bool:
         return self._worker is not None
@@ -699,9 +723,87 @@ class Bridge:
         # the operator can be about to speak, and a reply still in the LLM misses this progress
         while True:
             await self._quiet.wait()
+            await self._wait_operator_pause()
             await asyncio.sleep(max(QUIET_SECONDS, self._asked + REPLY_SECONDS - time.monotonic()))
-            if self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS:
+            if (self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS
+                    and not self.operator.speaking):
                 break
+
+    async def _wait_operator_pause(self) -> None:
+        while True:
+            if self.operator.speaking:
+                await asyncio.sleep(0.05)
+                continue
+            if self.operator.stopped_at is None:
+                return
+            remaining = OPERATOR_PAUSE_SECONDS - (time.monotonic() - self.operator.stopped_at)
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
+    def operator_voice_started(self) -> None:
+        if self._current_speech is not None:
+            self.server_speech_stopped(interrupted=True)
+
+    def server_speech_stopped(self, *, interrupted: bool = False) -> None:
+        item = self._current_speech
+        if item is None or self._speech_done is None:
+            return
+        if interrupted:
+            if item.interrupts < 1:
+                self._speech.appendleft(replace(item, interrupts=item.interrupts + 1))
+            else:
+                self._speech_dropped = True
+        self._speech_done.set()
+
+    def _stash_speech_missed(self) -> None:
+        if self._current_speech is not None and self._current_speech.missed is not None:
+            self._remember(*self._current_speech.missed)
+        for item in self._speech:
+            if item.missed is not None:
+                self._remember(*item.missed)
+
+    def _enqueue_speech(self, item: _SpeechItem) -> None:
+        self._speech.append(item)
+        if self._speech_task is None or self._speech_task.done():
+            self._speech_task = asyncio.create_task(self._drain_speech())
+
+    async def _drain_speech(self) -> None:
+        try:
+            while self._speech:
+                item = self._speech.popleft()
+                self._current_speech = item
+                try:
+                    await self._wait_quiet()
+                    worker = self._worker
+                    if worker is None:
+                        if item.missed is not None:
+                            self._remember(*item.missed)
+                        continue
+                    if not await self._play_speech(item) and item.missed is not None:
+                        self._remember(*item.missed)
+                finally:
+                    self._current_speech = None
+        finally:
+            if self._speech_task is asyncio.current_task():
+                self._speech_task = None
+
+    async def _play_speech(self, item: _SpeechItem) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
+        self._speech_done = asyncio.Event()
+        self._speech_dropped = False
+        try:
+            await worker.queue_frame(
+                TTSSpeakFrame(item.text, append_to_context=item.append_to_context)
+            )
+            if worker.turn_tracking_observer is None:
+                self.server_speech_stopped()
+            await self._speech_done.wait()
+            return not self._speech_dropped
+        finally:
+            self._speech_done = None
 
     def _schedule_linked(self) -> None:
         if self._worker is None:
@@ -800,15 +902,28 @@ class Bridge:
     def _named(self, session: Session, text: str) -> str:
         return f"{session.name}: {text}" if len(self.sessions.all()) > 1 else text
 
-    async def say(self, text: str, *, missed: tuple[str, str, str] | None = None) -> bool:
+    async def speak_again(self, text: str) -> bool:
+        if self._worker is None:
+            return False
+        self._enqueue_speech(_SpeechItem(text, append_to_context=False))
+        return True
+
+    async def _await_speech_idle(self) -> None:
         worker = self._worker
-        if worker is None:
+        if worker is not None and worker.turn_tracking_observer is None and self._speech_task is not None:
+            try:
+                await self._speech_task
+            except asyncio.CancelledError:
+                pass
+
+    async def say(self, text: str, *, missed: tuple[str, str, str] | None = None) -> bool:
+        if self._worker is None:
             if missed is not None:
                 self._remember(*missed)
             return False
         # Server speech is session content, never a Dispatcher record: SpokenReply
         # records only LLMTextFrame. TTS commits this text to assistant context itself.
-        await worker.queue_frame(TTSSpeakFrame(text))
+        self._enqueue_speech(_SpeechItem(text, missed=missed))
         return True
 
     async def _append(self, content: str) -> bool:

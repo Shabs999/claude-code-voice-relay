@@ -13,6 +13,7 @@ from voice_relay.bridge import FALLBACK, Bridge
 def fast_reminder(monkeypatch):
     monkeypatch.setattr(module, "FALLBACK_SECONDS", 0.005)
     monkeypatch.setattr(module, "QUIET_SECONDS", 0)
+    monkeypatch.setattr(module, "OPERATOR_PAUSE_SECONDS", 0)
     monkeypatch.setattr(module, "REPLY_SECONDS", 0)
 
 

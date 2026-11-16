@@ -25,11 +25,24 @@ HEADERS = {"authorization": f"Bearer {TOKEN}", "x-claude-session": "session-1"}
 class Worker:
     turn_tracking_observer = None
 
-    def __init__(self) -> None:
+    def __init__(self, bridge: Bridge | None = None, *, auto_speech: bool = True) -> None:
+        self._bridge = bridge
+        self._auto_speech = auto_speech
         self.frames: list[Any] = []
 
     async def queue_frame(self, frame: Any) -> None:
         self.frames.append(frame)
+        if (self._auto_speech and self._bridge is not None
+                and isinstance(frame, TTSSpeakFrame)):
+            self._bridge.server_speech_stopped()
+
+
+async def flush_speech(bridge: Bridge) -> None:
+    if bridge._speech_task is not None:
+        try:
+            await bridge._speech_task
+        except asyncio.CancelledError:
+            pass
 
 
 class Call:
@@ -44,7 +57,9 @@ class Call:
 async def voiced(*names: str) -> tuple[Bridge, Worker]:
     """A bridge with a voice worker and one linked session per name, history requests taken."""
     bridge, worker = Bridge(interval=0, linked_delay=3600), Worker()
+    worker._bridge = bridge
     bridge.attach(worker)  # type: ignore[arg-type]
+    worker._bridge = bridge
     for name in names:
         await bridge.link(name, name, "")
         assert (await bridge.sessions[name].next(1)) == {"kind": CONTEXT, "text": ""}
@@ -63,20 +78,23 @@ def _linked_speaks(frames: list[Any]) -> list[TTSSpeakFrame]:
 
 async def test_linked_notice_coalesces_across_rapid_links() -> None:
     bridge = Bridge(interval=0, linked_delay=0.05)
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     names = [f"s{i}" for i in range(7)]
     for index, name in enumerate(names):
         await bridge.link(f"id-{index}", name, "")
     await asyncio.sleep(0.15)
+    await flush_speech(bridge)
     linked = _linked_speaks(worker.frames)
     assert len(linked) == 1
     assert linked[0].text == LINKED.format(names=", ".join(names))
     await bridge.link("id-0", names[0], "")
     await asyncio.sleep(0.15)
+    await flush_speech(bridge)
     assert len(_linked_speaks(worker.frames)) == 1
     await bridge.link("id-7", "s7", "")
     await asyncio.sleep(0.15)
+    await flush_speech(bridge)
     linked = _linked_speaks(worker.frames)
     assert len(linked) == 2
     assert linked[1].text == LINKED.format(names=", ".join(names + ["s7"]))
@@ -84,16 +102,18 @@ async def test_linked_notice_coalesces_across_rapid_links() -> None:
 
 async def test_linked_notice_repeats_after_unlink() -> None:
     bridge = Bridge(interval=0, linked_delay=0)
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.link("shop", "shop", "")
     await bridge._linked_task
+    await flush_speech(bridge)
     linked = _linked_speaks(worker.frames)
     assert len(linked) == 1
     assert linked[0].text == LINKED.format(names="shop")
     await bridge.unlink("shop")
     await bridge.link("shop", "shop", "")
     await bridge._linked_task
+    await flush_speech(bridge)
     linked = _linked_speaks(worker.frames)
     assert len(linked) == 2
     assert linked[1].text == LINKED.format(names="shop")
@@ -140,7 +160,7 @@ async def test_an_answer_leaves_latest_progress_silent() -> None:
     bridge.progress(bridge.sessions["shop"], "runs make lint")
     bridge.progress(bridge.sessions["api"], "reads the log")
     assert await bridge.answer(bridge.sessions["shop"], "done")
-    await asyncio.sleep(0)
+    await flush_speech(bridge)
     context, answer = worker.frames
     assert not context.run_llm
     assert answer.text == "shop: done"
@@ -174,6 +194,7 @@ async def test_progress_stays_silent_after_the_reply_to_an_answer(
     monkeypatch.setattr(bridge_module, "REPLY_SECONDS", 0.05)
     bridge, worker = await voiced("shop", "api")
     assert await bridge.answer(bridge.sessions["shop"], "done")
+    await flush_speech(bridge)
     bridge.progress(bridge.sessions["api"], "reads the log")
     await asyncio.sleep(0.01)
     assert len(worker.frames) == 2
@@ -270,11 +291,12 @@ async def test_missed_updates_replay_once_after_greeting(monkeypatch: pytest.Mon
     assert [(kind, text) for _, kind, _, text, _ in bridge._missed] == [
         ("answer", "finished"), ("progress", "still working"), ("waiting", "approve command")
     ]
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge._append("greeting")
     await bridge.replay()  # the client-ready path queues its greeting first
     await bridge.replay()
+    await flush_speech(bridge)
     assert len(worker.frames) == 2
     frame = worker.frames[1]
     text = frame.text
@@ -303,7 +325,7 @@ async def test_missed_updates_have_count_and_replay_age_limits(
     assert len(bridge._missed) == 500
     assert bridge._missed[0][3] == "1"
     clock[0] += 28860
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
     assert not worker.frames and not bridge._missed
@@ -317,15 +339,16 @@ async def test_replay_consumed_even_on_quick_reconnect(
     monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
     bridge = Bridge(interval=0)
     bridge._remember("waiting", "shop", "approve command")
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)
     await bridge.replay()
     clock[0] += seconds
     bridge.detach(worker)
     assert bool(bridge._missed) is retained
-    second = Worker()
+    second = Worker(bridge)
     bridge.attach(second)
     await bridge.replay()
+    await flush_speech(bridge)
     assert bool(second.frames) is retained
     if retained:
         assert second.frames[0].text == worker.frames[0].text
@@ -339,11 +362,12 @@ async def test_unlink_announces_once(
     bridge = Bridge(interval=0)
     assert bridge.linked_line() == "Claude Code sessions linked now: none."
     await bridge.link("old", "shop", "/work/shop")
-    worker = Worker()
+    worker = Worker(bridge)
     if connected:
         bridge.attach(worker)
     await bridge.unlink("old")
     await asyncio.gather(*bridge._drops.values())
+    await flush_speech(bridge)
     await bridge.unlink("old")
     assert "The last one was shop, which dropped off at" in bridge.linked_line()
     if connected:
@@ -359,7 +383,7 @@ async def test_unlink_announces_once(
 async def test_handover_cancels_drop(connected: bool) -> None:
     bridge = Bridge(interval=0)
     await bridge.link("old", "shop", "/work/shop")
-    worker = Worker()
+    worker = Worker(bridge)
     if connected:
         bridge.attach(worker)
     await bridge.unlink("old")
@@ -420,6 +444,7 @@ def test_missed_updates_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_answer_detail_is_only_in_detail_block() -> None:
     bridge, worker = await voiced("shop")
     assert await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
+    await flush_speech(bridge)
     frame, spoken = worker.frames
     assert spoken.text == "Done."
     assert not frame.run_llm
@@ -438,9 +463,10 @@ async def test_answer_catchup_contains_only_spoken_part() -> None:
     assert not await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
     await bridge.replay()  # no worker yet; keep the answer for catch-up
     assert [(kind, text) for _, kind, _, text, _ in bridge._missed] == [("answer", "Done.")]
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)  # type: ignore[arg-type]
     await bridge.replay()
+    await flush_speech(bridge)
     (frame,) = worker.frames
     assert "shop: Done." in frame.text
     assert "Private detail." not in frame.text
@@ -524,38 +550,42 @@ async def test_empty_speech_does_not_authorize_task():
 async def test_answer_catchup_once_across_workers() -> None:
     bridge = Bridge(interval=0)
     bridge._remember("answer", "shop", "Finished.")
-    first = Worker()
+    first = Worker(bridge)
     bridge.attach(first)
     await bridge.replay()
+    await flush_speech(bridge)
     assert len(first.frames) == 1
     bridge.detach(first)
-    second = Worker()
+    second = Worker(bridge)
     bridge.attach(second)
     await bridge.replay()
+    await flush_speech(bridge)
     assert not second.frames
     bridge.detach(second)
 
 
 async def test_hold_catchup_consumed_before_reconnect() -> None:
     bridge = Bridge(interval=0)
-    first = Worker()
+    first = Worker(bridge)
     bridge.attach(first)
     await bridge.hold(None)
     bridge._remember("answer", "shop", "Finished.")
     await bridge.release()
+    await flush_speech(bridge)
     assert len(first.frames) == 1
     assert not bridge._missed
     bridge.detach(first)
-    second = Worker()
+    second = Worker(bridge)
     bridge.attach(second)
     await bridge.replay()
+    await flush_speech(bridge)
     assert not second.frames
     bridge.detach(second)
 
 
 async def test_replay_failed_say_keeps_items(monkeypatch) -> None:
     bridge = Bridge(interval=0)
-    worker = Worker()
+    worker = Worker(bridge)
     bridge.attach(worker)
     bridge._remember("answer", "shop", "Finished.")
     say = bridge.say

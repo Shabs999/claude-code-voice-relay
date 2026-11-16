@@ -268,6 +268,19 @@ def mount(
             raise HTTPException(400, str(error)) from None
         return JSONResponse({"held": bridge.held(), "message": message})
 
+    @app.post("/desktop/replay")
+    async def replay(request: Request) -> Response:
+        authorize(request)
+        text = _text(await _body(request), "text").strip()
+        if not text:
+            raise HTTPException(400, "text: expected a non-empty string")
+        if len(text) > 2000:
+            raise HTTPException(400, "text: expected at most 2000 characters")
+        if not bridge.voice():
+            raise HTTPException(409, "no voice client is connected")
+        await bridge.speak_again(text)
+        return Response(status_code=204)
+
     @app.post("/desktop/prefs")
     async def preferences(request: Request) -> Response:
         authorize(request)
