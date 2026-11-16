@@ -175,9 +175,12 @@ class Update:
 class Bridge:
     """The linked sessions, and the one live voice worker that hears about them."""
 
-    def __init__(self, *, interval: float) -> None:
+    def __init__(self, *, interval: float, linked_delay: float = 5.0) -> None:
         # interval is accepted for older callers; progress is never narrated.
         self.sessions = Sessions()
+        self._linked_delay = linked_delay
+        self._linked_said: str | None = None
+        self._linked_task: asyncio.Task[None] | None = None
         self._exchange: list[Line] = []
         self._fragment_at = 0.0
         self._spoke_at: float | None = None
@@ -356,6 +359,7 @@ class Bridge:
 
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
+        self._linked_said = None
         if self._fallback is not None:
             self._fallback.cancel()
         self._fallback = asyncio.create_task(self._remind())
@@ -389,6 +393,9 @@ class Bridge:
             if self._fallback is not None:
                 self._fallback.cancel()
                 self._fallback = None
+            if self._linked_task is not None:
+                self._linked_task.cancel()
+                self._linked_task = None
 
     def voice(self) -> bool:
         return self._worker is not None
@@ -396,7 +403,7 @@ class Bridge:
     def active(self) -> bool:
         """True while a voice client is connected or a session polls. Drops gone sessions."""
         if self.sessions.prune():
-            self._notify(self.linked_line())
+            self._schedule_linked()
         return self._worker is not None or bool(self.sessions.live())
 
     def linked_line(self) -> str:
@@ -427,7 +434,7 @@ class Bridge:
             pending.cancel()
         if new and self._worker is not None:
             session.want_history()
-            await self.say(self.linked_line())
+            self._schedule_linked()
         if new:
             self.sessions.release(session)
         return session.name
@@ -437,6 +444,7 @@ class Bridge:
             return
         session = self.sessions[session_id]
         self.sessions.unlink(session_id)
+        self._linked_said = None
         dropped = time.time()
         self._last_dropped = (session.name, dropped)
         pending = self._drops.pop(session.folder, None)
@@ -694,6 +702,27 @@ class Bridge:
             await asyncio.sleep(max(QUIET_SECONDS, self._asked + REPLY_SECONDS - time.monotonic()))
             if self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS:
                 break
+
+    def _schedule_linked(self) -> None:
+        if self._worker is None:
+            return
+        if self._linked_task is not None:
+            self._linked_task.cancel()
+        self._linked_task = asyncio.create_task(self._announce_linked())
+
+    async def _announce_linked(self) -> None:
+        try:
+            await asyncio.sleep(self._linked_delay)
+            if self._worker is None:
+                return
+            line = self.linked_line()
+            if line == self._linked_said:
+                return
+            if await self.say(line):
+                self._linked_said = line
+        finally:
+            if self._linked_task is asyncio.current_task():
+                self._linked_task = None
 
     def _notify(self, content: str) -> None:
         """Appends from sync code; the set holds each task until it ends."""

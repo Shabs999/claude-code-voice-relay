@@ -68,6 +68,8 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
 
 
 async def test_pending_no_worker_and_link_notice(bridge):
+    bridge = Bridge(interval=0, linked_delay=0)
+    bridge.sessions.link("one", "one", "")
     worker = Worker()
     bridge._worker = worker
     bridge._quiet.clear()
@@ -75,6 +77,7 @@ async def test_pending_no_worker_and_link_notice(bridge):
     await bridge.update(session, "milestone", "pending work", None, False)
     await bridge.hold(None)
     await bridge.link("two", "two", "")
+    await bridge._linked_task
     assert len(worker.frames) == 1
     assert "sessions linked now" in worker.frames[0].text
     bridge._worker = None

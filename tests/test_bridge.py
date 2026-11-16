@@ -11,7 +11,9 @@ from fastapi import FastAPI
 
 from voice_relay import bridge as bridge_module
 from voice_relay import routes, sessions, terminal
-from voice_relay.bridge import QUOTE, STOPPED, Bridge
+from pipecat.frames.frames import TTSSpeakFrame
+
+from voice_relay.bridge import LINKED, QUOTE, STOPPED, Bridge
 from voice_relay.processors import Microphone
 from voice_relay.sessions import ABORT, CONTEXT, TASK
 
@@ -41,13 +43,60 @@ class Call:
 
 async def voiced(*names: str) -> tuple[Bridge, Worker]:
     """A bridge with a voice worker and one linked session per name, history requests taken."""
-    bridge, worker = Bridge(interval=0), Worker()
+    bridge, worker = Bridge(interval=0, linked_delay=3600), Worker()
     bridge.attach(worker)  # type: ignore[arg-type]
     for name in names:
         await bridge.link(name, name, "")
         assert (await bridge.sessions[name].next(1)) == {"kind": CONTEXT, "text": ""}
+    if bridge._linked_task is not None:
+        bridge._linked_task.cancel()
+        bridge._linked_task = None
+    bridge._linked_said = bridge.linked_line()
     worker.frames.clear()
     return bridge, worker
+
+
+def _linked_speaks(frames: list[Any]) -> list[TTSSpeakFrame]:
+    prefix = LINKED.split("{")[0]
+    return [frame for frame in frames if isinstance(frame, TTSSpeakFrame) and frame.text.startswith(prefix)]
+
+
+async def test_linked_notice_coalesces_across_rapid_links() -> None:
+    bridge = Bridge(interval=0, linked_delay=0.05)
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    names = [f"s{i}" for i in range(7)]
+    for index, name in enumerate(names):
+        await bridge.link(f"id-{index}", name, "")
+    await asyncio.sleep(0.15)
+    linked = _linked_speaks(worker.frames)
+    assert len(linked) == 1
+    assert linked[0].text == LINKED.format(names=", ".join(names))
+    await bridge.link("id-0", names[0], "")
+    await asyncio.sleep(0.15)
+    assert len(_linked_speaks(worker.frames)) == 1
+    await bridge.link("id-7", "s7", "")
+    await asyncio.sleep(0.15)
+    linked = _linked_speaks(worker.frames)
+    assert len(linked) == 2
+    assert linked[1].text == LINKED.format(names=", ".join(names + ["s7"]))
+
+
+async def test_linked_notice_repeats_after_unlink() -> None:
+    bridge = Bridge(interval=0, linked_delay=0)
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    await bridge.link("shop", "shop", "")
+    await bridge._linked_task
+    linked = _linked_speaks(worker.frames)
+    assert len(linked) == 1
+    assert linked[0].text == LINKED.format(names="shop")
+    await bridge.unlink("shop")
+    await bridge.link("shop", "shop", "")
+    await bridge._linked_task
+    linked = _linked_speaks(worker.frames)
+    assert len(linked) == 2
+    assert linked[1].text == LINKED.format(names="shop")
 
 
 async def test_a_task_goes_to_the_only_session_without_a_name() -> None:
