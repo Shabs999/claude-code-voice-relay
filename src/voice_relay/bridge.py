@@ -18,6 +18,7 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
+from .feed import Feed
 from .record import Line, filler, task_message
 from .sessions import ABORT, TASK, Session, Sessions, key, mentioned
 
@@ -215,6 +216,8 @@ class Bridge:
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
         self._telegram: Any = None
+        self.feed = Feed()
+        self._aimed_reply_to: int | None = None
 
     def held(self) -> bool:
         if self._hold_until is None:
@@ -323,21 +326,33 @@ class Bridge:
         if self._aimed is None or self._aimed not in self.sessions.live():
             return None
         if time.monotonic() - self._aimed_at > AIM_SECONDS:
+            self._aimed_reply_to = None
             return None
         return self._aimed.name
 
-    def set_aim(self, name: str | None) -> None:
+    def aimed_state(self) -> dict[str, Any] | None:
+        name = self.aimed()
+        if name is None:
+            return None
+        return {"session": name, "reply_to": self._aimed_reply_to}
+
+    def set_aim(self, name: str | None, *, reply_to: int | None = None) -> None:
         if name is None:
             self._aimed = None
+            self._aimed_reply_to = None
             return
         found = self.sessions.find(name)
         if not isinstance(found, Session) or found not in self.sessions.live():
             raise ValueError("session: expected a linked session name")
+        if reply_to is not None and self.feed.get(reply_to) is None:
+            raise ValueError("reply_to: expected a feed event id")
         self._aimed = found
         self._aimed_at = time.monotonic()
+        self._aimed_reply_to = reply_to
 
     def _clear_aim(self) -> None:
         self._aimed = None
+        self._aimed_reply_to = None
 
     async def operator_text(self, text: str) -> bool:
         worker = self._worker
@@ -504,6 +519,7 @@ class Bridge:
             self._current = None
         if self._aimed is session:
             self._aimed = None
+            self._aimed_reply_to = None
         self._updates = [item for item in self._updates if item.session is not session]
         self._update_seen = [
             (item, outcome) for item, outcome in self._update_seen
@@ -583,6 +599,7 @@ class Bridge:
             self._updates.append(item)
             if self._speaker is None or self._speaker.done():
                 self._speaker = asyncio.create_task(self._speak_updates())
+        self.feed.record_update(session, text, options, wall=item.wall)
         if self._telegram is not None:
             try:
                 await self._telegram.on_update(session, kind, text, options)
@@ -640,6 +657,7 @@ class Bridge:
             item for item in self._updates
             if not (item.session is session and item.kind in {"milestone", "done"})
         ]
+        self.feed.record_answer(session, text)
         if self._telegram is not None:
             try:
                 await self._telegram.on_answer(session, text)
@@ -662,6 +680,7 @@ class Bridge:
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         session.asked_at = None
+        self.feed.record_waiting(session, action)
         if self._telegram is not None:
             try:
                 await self._telegram.on_waiting(session, action)
@@ -696,21 +715,77 @@ class Bridge:
             return self._current
         return found
 
-    def _dispatch_task(self, session: Session, message: str, *, asked: str = "") -> bool:
+    def _dispatch_task(self, session: Session, message: str, *,
+                       asked: str | None = None, door: str = "voice",
+                       attachments: tuple[str, ...] = ()) -> bool:
         busy, session.running = session.running, True
         session.asked_at = time.monotonic()
         session.asked_text = asked or message
         session.reminded = False
         session.send(TASK, message)
+        self.feed.record_you(session, message if asked is None else asked, door, attachments)
         self._current = session
         self._clear_aim()
         return busy
 
-    async def send_task_direct(self, session: Session, message: str) -> bool:
+    def _task_body(self, lines: list[Line], session: Session | None = None) -> str:
+        from .telegram import format_inbound
+
+        shahab = [line for line in lines if line.speaker == "Shahab"]
+        if not shahab:
+            return ""
+        reply_id = self._aimed_reply_to
+        if reply_id is not None:
+            event = self.feed.get(reply_id)
+            if event is not None and (session is None or event.session == session.name):
+                typed_only = all(line.typed for line in shahab)
+                channel = "typing" if typed_only else "voice"
+                words = "\n".join(
+                    (("(typed) " if line.typed else "") + line.text) for line in shahab
+                )
+                return format_inbound(
+                    words,
+                    wall=time.time(),
+                    reply_text=event.text,
+                    reply_wall=event.wall,
+                    reply_header=True,
+                    channel=channel,
+                )
+        return task_message(lines)
+
+    async def send_task_direct(
+        self, session: Session, message: str, *, text: str | None = None,
+        door: str = "voice page option", attachments: tuple[str, ...] = (),
+    ) -> bool:
         if session not in self.sessions.live():
             return False
-        self._dispatch_task(session, message)
+        self._dispatch_task(session, message, asked=text, door=door, attachments=attachments)
         return True
+
+    async def send_feed_option(self, event_id: int, number: str) -> str | None:
+        """Send an option tap; returns None on success or an error token."""
+        from .telegram import format_option_tap
+
+        event = self.feed.get(event_id)
+        if event is None:
+            return "missing"
+        if event.answered is not None:
+            return "answered"
+        if number not in event.options:
+            return "missing"
+        session = self.sessions.find(event.session)
+        if not isinstance(session, Session) or session not in self.sessions.live():
+            return "missing"
+        body = format_option_tap(
+            number,
+            wall=time.time(),
+            message_time=event.time,
+            channel="voice page",
+        )
+        if not await self.send_task_direct(session, body, text=number):
+            return "missing"
+        self.feed.mark_answered(event_id, number)
+        return None
 
     async def _send_task(self, params: FunctionCallParams) -> None:
         if not self._operator_spoke_recently():
@@ -728,7 +803,7 @@ class Bridge:
         lines = [line for block in found.record.blocks for line in block.lines]
         lines.extend(found.record.lines)
         lines.extend(self._exchange)
-        message = task_message(lines)
+        message = self._task_body(lines, found)
         if not message:
             await params.result_callback("not sent: nothing the operator said to pass on")
             return
@@ -741,7 +816,9 @@ class Bridge:
             found.record.ack(block.id)
         busy = self._dispatch_task(found, message, asked=("\n".join(
             line.text for line in sorted(lines, key=lambda line: line.wall_time)
-            if line.speaker == "Shahab")))
+            if line.speaker == "Shahab")),
+            door="typing" if all(line.typed for line in lines
+                                      if line.speaker == "Shahab") else "voice")
         after = ", Claude Code starts it after the current turn" if busy else ""
         await self.say(f"Sent to {found.name}.")
         self._gag = True

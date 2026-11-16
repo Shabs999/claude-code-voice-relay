@@ -18,6 +18,14 @@ from loguru import logger
 
 from . import settings
 from .bridge import Bridge
+from .feed import (
+    _ensure_inbox,
+    _inbox_stamp,
+    _safe_name,
+    detect_options,
+    save_inbox_file,
+    spoken_part,
+)
 from .record import clock
 from .sessions import Session, key, mentioned
 
@@ -36,8 +44,7 @@ ALBUM_WAIT = 2.0
 TTS_SPOKEN_MAX = 600
 DND_SUMMARY = 300
 DEFAULT_STT_MODEL = "gpt-4o-transcribe"
-SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
-OPTION_PATTERN = re.compile(r"^(\d+)\.\s+\S")
+
 PENDING = "pending"
 MESSAGE = "messages"
 OFFSET = "offset"
@@ -229,54 +236,6 @@ class MapStore:
         self.save()
 
 
-def _safe_name(name: str, *, default: str = "file.bin") -> str:
-    cleaned = SAFE_NAME.sub("_", name.strip()) or default
-    return cleaned[:80]
-
-
-def _spoken_part(text: str) -> str:
-    text = text.replace("\r\n", "\n")
-    if re.search(r"(?m)^---$", text):
-        return re.split(r"(?m)^---$", text, maxsplit=1)[0].strip()
-    text = text.strip()
-    if len(text) <= TTS_SPOKEN_MAX:
-        return text
-    return text[:TTS_SPOKEN_MAX]
-
-
-def _inbox_stamp() -> str:
-    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
-
-
-def _ensure_inbox(folder: str) -> Path:
-    inbox = Path(folder) / ".handsfree-inbox"
-    inbox.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _ensure_git_exclude(Path(folder), inbox)
-    return inbox
-
-
-def _ensure_git_exclude(repo: Path, inbox: Path) -> None:
-    git = repo / ".git"
-    if not git.is_dir():
-        return
-    exclude = git / "info" / "exclude"
-    line = f"{inbox.name}/"
-    try:
-        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    except OSError:
-        return
-    if any(row.strip() == line for row in existing.splitlines()):
-        return
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with exclude.open("a", encoding="utf-8") as handle:
-            if existing and not existing.endswith("\n"):
-                handle.write("\n")
-            handle.write(line + "\n")
-    except OSError:
-        logger.warning("telegram: could not update git exclude")
-
-
 def _excerpt(text: str) -> str:
     text = text.replace("\r\n", "\n")
     if len(text) <= EXCERPT:
@@ -352,25 +311,10 @@ def split_outbound(text: str, *, limit: int = SEND_LIMIT) -> list[str]:
 
 
 def numbered_keyboard(text: str) -> list[list[dict[str, str]]] | None:
-    lines = text.replace("\r\n", "\n").splitlines()
-    lines = lines[:lines.index("---")] if "---" in lines else lines[-15:]
-    for index, line in enumerate(lines):
-        if not OPTION_PATTERN.match(line.strip()):
-            continue
-        if index and OPTION_PATTERN.match(lines[index - 1].strip()):
-            continue
-        preceding = [row.strip() for row in lines[:index] if row.strip()][-2:]
-        if not any(row.endswith("?") for row in preceding):
-            continue
-        numbers = []
-        for row in lines[index:]:
-            match = OPTION_PATTERN.match(row.strip())
-            if not match:
-                break
-            numbers.append(match[1])
-        if 2 <= len(numbers) <= 4:
-            return [[{"text": n, "callback_data": f"opt:{n}"}] for n in numbers]
-    return None
+    numbers = detect_options(text)
+    if not numbers:
+        return None
+    return [[{"text": n, "callback_data": f"opt:{n}"}] for n in numbers]
 
 
 def format_inbound(
@@ -400,9 +344,11 @@ def format_inbound(
     return body
 
 
-def format_option_tap(number: str, *, wall: float, message_time: str) -> str:
+def format_option_tap(
+    number: str, *, wall: float, message_time: str, channel: str = "Telegram",
+) -> str:
     return (
-        f"Shahab, by Telegram ({clock(wall)}), tapped option {number} "
+        f"Shahab, by {channel} ({clock(wall)}), tapped option {number} "
         f"on your message of {message_time}:\n{number}"
     )
 
@@ -683,7 +629,7 @@ class Door:
             return None
 
     async def _voice_reply(self, session_name: str, body: str, *, reply_to: int) -> None:
-        spoken = _spoken_part(body)
+        spoken = spoken_part(body)
         if not spoken or self.openai is None:
             return
         env = settings.environment()
@@ -985,7 +931,8 @@ class Door:
                 else f"({count} files could not be downloaded: {names})"
             )
             body += "\n" + note
-        if not await self.bridge.send_task_direct(session, body):
+        if not await self.bridge.send_task_direct(session, body, text=caption, door="telegram",
+                                                  attachments=tuple(saved.paths)):
             await self._send(
                 f"{escape_html(session.name)} is not linked right now.",
                 reply_to=lead.get("message_id"),
@@ -1025,19 +972,7 @@ class Door:
             if len(messages) > 1:
                 prefix += f"-{index}"
             filename = f"{prefix}-{safe}"
-            dest = inbox / filename
-            suffix = 1
-            while True:
-                try:
-                    with dest.open("xb") as output:
-                        dest.chmod(0o600)
-                        output.write(data)
-                    break
-                except FileExistsError:
-                    suffix += 1
-                    original_path = Path(filename)
-                    dest = inbox / f"{original_path.stem}-{suffix}{original_path.suffix}"
-            paths.append(str(dest.resolve()))
+            paths.append(save_inbox_file(inbox, filename, data))
         return AttachmentSave(paths=paths, failed=failed)
 
     def _media_file(self, message: dict[str, Any]) -> tuple[str | None, str]:
@@ -1076,7 +1011,8 @@ class Door:
         body = self._build_body(
             text, message, channel=channel, attachments=attachments,
         )
-        if not await self.bridge.send_task_direct(session, body):
+        if not await self.bridge.send_task_direct(session, body, text=text, door=channel.lower(),
+                                                  attachments=attachments):
             await self._send(
                 f"{escape_html(session.name)} is not linked right now.",
                 reply_to=message.get("message_id"),
@@ -1260,7 +1196,11 @@ class Door:
             body = format_option_tap(
                 parts[2], wall=time.time(), message_time=pending["time"],
             )
-        sent = await self.bridge.send_task_direct(found, body)
+        sent = await self.bridge.send_task_direct(
+            found, body, text=pending.get("text", parts[2]),
+            door=channel.lower() if pending.get("text") else "telegram option",
+            attachments=tuple(attachments) if kind == "pick" else (),
+        )
         if sent and pending.get("heard_id") is not None:
             self.map.remember_message(
                 pending["heard_id"], session=found.name, text=f"Heard: {pending['text']}",

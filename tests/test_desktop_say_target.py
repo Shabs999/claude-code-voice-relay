@@ -75,11 +75,12 @@ async def test_target_routes(bridge, monkeypatch) -> None:
         assert (await client.post("/desktop/target", headers=headers,
                                   json={"session": "one"})).status_code == 204
         state = (await client.get("/desktop/state", headers=headers)).json()
-        assert state["aimed"] == "one"
+        assert state["aimed"] == {"session": "one", "reply_to": None}
         assert (await client.post("/desktop/target", headers=headers,
                                   json={"session": None})).status_code == 204
         state = (await client.get("/desktop/state", headers=headers)).json()
         assert state["aimed"] is None
+        assert "feed_last" in state
 
 
 async def test_resolve_session_aim_order(bridge, monkeypatch) -> None:

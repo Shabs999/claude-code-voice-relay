@@ -2,7 +2,7 @@
 <html lang="en" class="wa-cloak">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>voice-relay</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%234f46e5%27 stroke-width=%272.4%27 stroke-linecap=%27round%27%3E%3Cpath d=%27M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4%27/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@awesome.me/webawesome@3.14.0/dist-cdn/styles/webawesome.css">
@@ -24,7 +24,8 @@
   --wa-form-control-activated-color: #8b87ff; --wa-color-focus: #8b87ff;
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html { height: 100%; overflow: hidden; }
+body { height: 100vh; height: 100dvh; overflow: hidden; width: 100%; }
 body { margin: 0; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); display: flex; flex-direction: column; }
 .top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
 body.talking .top { display: none; }
@@ -117,10 +118,10 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 
 .log-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
-.line { max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
+.line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
-.compose { display: flex; gap: 8px; align-items: center; padding-top: 8px; flex: none; }
+.compose { padding-bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; align-items: center; padding-top: 8px; flex: none; }
 .compose .typed {
   flex: 1; min-width: 0; min-height: 44px; margin: 0; padding: 10px 12px; font: inherit; font-size: 16px;
   border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
@@ -134,6 +135,41 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 }
 .compose .send:active { transform: scale(.97); }
 .compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--bad); }
+
+.feed-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; max-height: 42%; min-height: 0; border-top: 1px solid var(--wa-color-surface-border); padding-top: 8px; margin-top: 4px; }
+.feed { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.feed-card {
+  border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
+  background: var(--wa-color-surface-lowered); padding: 10px 12px; text-align: left; cursor: pointer;
+  font: inherit; color: inherit; width: 100%;
+}
+.feed-card.you { align-self: flex-end; width: 88%; cursor: default; background: var(--wa-color-brand-fill-quiet, #eef0ff); overflow-wrap: anywhere; }
+.file-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: none; }
+.file-chips button { max-width: 100%; overflow-wrap: anywhere; }
+.attach { width: 44px; height: 44px; flex: none; font-size: 22px; background: none; color: inherit; border: 0; }
+.feed-card.selected { outline: 2px solid var(--dot); outline-offset: 0; }
+.feed-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: var(--wa-font-size-xs); }
+.feed-name { font-weight: var(--wa-font-weight-semibold); color: var(--dot); }
+.feed-time { color: var(--wa-color-text-quiet); margin-left: auto; }
+.feed-body { overflow-wrap: anywhere; min-width: 0; font-size: var(--wa-font-size-s); line-height: 1.4; }
+.feed-body.collapsed { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
+.feed-body code { font-family: var(--wa-font-family-code); font-size: .92em; }
+.feed-more { margin-top: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; min-height: 44px; }
+.feed-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.feed-opt {
+  min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: var(--wa-border-radius-m);
+  border: 1px solid var(--wa-color-surface-border); background: var(--wa-color-surface-default);
+  font: inherit; font-size: var(--wa-font-size-s); cursor: pointer;
+}
+.feed-opt:disabled { opacity: .45; cursor: default; }
+.feed-answered { margin-top: 6px; font-size: var(--wa-font-size-xs); color: var(--wa-color-text-quiet); }
+.reply-chip {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 6px 10px;
+  border-radius: 999px; background: var(--wa-color-brand-fill-quiet, #eef0ff);
+  font-size: var(--wa-font-size-xs);
+}
+.reply-chip button { min-width: 44px; min-height: 44px; border: 0; background: none; cursor: pointer; font: inherit; }
 </style>
 </head>
 <body>
@@ -194,7 +230,18 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
+      <div class="feed-wrap">
+        <h2>Projects</h2>
+        <div class="feed" id="feed" aria-live="polite"></div>
+      </div>
+      <div class="reply-chip hidden" id="reply-chip">
+        <span id="reply-label"></span>
+        <button type="button" id="reply-clear" aria-label="Clear reply">✕</button>
+      </div>
+      <div class="file-chips" id="file-chips"></div>
+      <input id="files" type="file" multiple accept="image/*,application/pdf,text/*,video/*" hidden>
       <form class="compose" id="compose">
+        <button class="attach" type="button" id="attach" aria-label="Attach files">📎</button>
         <input class="typed" id="typed" type="text" enterkeyhint="send" autocomplete="off" maxlength="2000" placeholder="Message the Dispatcher…" />
         <button class="send" type="submit">Send</button>
       </form>
@@ -228,6 +275,8 @@ let state = null, picks = {}, typed = {}, client = null, transport = null, local
 let wanted = false, retryTimer = null, retryStep = 0;
 const PAGE_ID = Math.random().toString(36).slice(2, 8);
 let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot, aimed;
+let selectedFiles = [], pickingProject = false, feedBusy = false;
+let feedLast = 0, feedEvents = new Map(), feedExpanded = new Set(), replyTo = null;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
 let speed = 1.5, voice = "ash";
@@ -264,6 +313,30 @@ const desktopApi = (path, body) => api(path, body, { authorization: `Bearer ${TO
 function note(event, reason = "", detail = "") {
   desktopApi("/desktop/client-log", { event, reason, detail: String(detail).slice(0, 200), page: PAGE_ID, t: Math.round(performance.now()) }).catch(() => {});
 }
+const audioNoteAt = {};
+function noteAudio(kind, event, reason = "", detail = "") {
+  const now = performance.now();
+  if (audioNoteAt[kind] && now - audioNoteAt[kind] < 1000) return;
+  audioNoteAt[kind] = now;
+  note(event, reason, detail);
+}
+function ensureAudioPlaying(reason) {
+  if (!audio.srcObject) return;
+  const force = reason === "track" || reason === "allow-sound";
+  if (!force && (!connected || !audio.paused)) return;
+  audio.play()
+    .then(() => {
+      $("sound").classList.add("hidden");
+      if (!force) noteAudio("audio-resumed", "audio-resumed", reason);
+    })
+    .catch(err => {
+      $("sound").classList.remove("hidden");
+      if (reason !== "allow-sound") playChime();
+      noteAudio("audio-play-rejected", "audio-play-rejected", err?.name || String(err));
+    });
+}
+audio.addEventListener("pause", () => noteAudio("audio-paused", "audio-paused"));
+audio.addEventListener("playing", () => noteAudio("audio-playing", "audio-playing"));
 
 /* Setup: three parts, each on an API, on this computer or on the operator's server. */
 
@@ -589,6 +662,7 @@ function setAudioSession(type) {
     if (navigator.audioSession && navigator.audioSession.type !== type) {
       navigator.audioSession.type = type;
       note("audio-session", type);
+      ensureAudioPlaying("audio-session");
     }
   } catch (e) {
     note("audio-session-failed", type, e?.message || e);
@@ -615,6 +689,7 @@ async function releaseMic() {
     try { transport.mediaManager?._daily?.setLocalAudio?.(false, { forceDiscardTrack: true }); } catch { /* */ }
   } catch { /* not connected yet */ }
   setAudioSession("playback");
+  ensureAudioPlaying("mic-released");
 }
 
 async function takeMic() {
@@ -633,6 +708,7 @@ async function takeMic() {
     setAudioSession("play-and-record");
     client.enableMic(true);
     note("mic-taken", "", stream.getAudioTracks()[0]?.label || "");
+    ensureAudioPlaying("mic-taken");
     return true;
   } catch {
     stream?.getTracks().forEach(t => t.stop());
@@ -679,13 +755,20 @@ async function openConnection(replace, reason) {
       onTrackStarted(track, participant) {
         if (participant?.local || track.kind !== "audio") return;
         audio.srcObject = new MediaStream([track]);
-        audio.play().then(() => $("sound").classList.add("hidden")).catch(() => $("sound").classList.remove("hidden"));
+        ensureAudioPlaying("track");
       },
       onUserTranscript(data) { if (data.final && data.text.trim()) say("you", data.text); },
       onBotOutput(data) {  // one message per segment when new, more as its words are spoken
         if ((data.spoken_status ?? "new") === "new" && data.aggregated_by !== "word" && data.text.trim()) say("agent", data.text);
       },
-      onBotStartedSpeaking() { speaking = true; show(); },
+      onBotStartedSpeaking() {
+        speaking = true;
+        const session = navigator.audioSession?.type ?? "none";
+        noteAudio("speech-arrived", "speech-arrived", "",
+          `paused=${audio.paused} muted=${audio.muted} volume=${audio.volume} session=${session}`);
+        ensureAudioPlaying("speech-arrived");
+        show();
+      },
       onBotStoppedSpeaking() { speaking = false; lastAgent = null; show(); },
       onDisconnected() {
         if (client !== attempt) return;
@@ -764,9 +847,117 @@ function projectColor(name) {
   return PROJECT_COLORS[hash % PROJECT_COLORS.length];
 }
 
+function escapeText(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\u0000/g, "");
+}
+
+function feedMarkdown(text) {
+  const slots = [];
+  const keep = value => { slots.push(value); return `\u0000${slots.length - 1}\u0000`; };
+  let html = escapeText(text).replace(/\r\n/g, "\n");
+  html = html.replace(/```[^\n`]*\n([\s\S]*?)\n```/g, (_, code) => keep(`<pre><code>${code}</code></pre>`));
+  html = html.replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${code}</code>`));
+  html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, href) =>
+    keep(`<a href="${href.replace(/"/g, "&quot;")}">${label}</a>`));
+  for (const marker of ["**", "__"]) {
+    const re = new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?=\\S)(.+?)(?<=\\S)" + marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    html = html.replace(re, (_, inner) => keep(`<b>${inner}</b>`));
+  }
+  html = html.replace(/^#{1,6} +(.+)$/gm, "<b>$1</b>");
+  html = html.replace(/^[-*] +/gm, "• ");
+  for (let i = slots.length - 1; i >= 0; i--) html = html.replace(`\u0000${i}\u0000`, slots[i]);
+  return html;
+}
+
+function updateReplyChip() {
+  const chip = $("reply-chip");
+  if (replyTo != null && aimed) {
+    $("reply-label").textContent = `Replying to ${aimed}`;
+    chip.classList.remove("hidden");
+  } else chip.classList.add("hidden");
+}
+
+async function clearReply() {
+  try { await desktopApi("/desktop/target", { session: null }); } catch { /* poll */ }
+}
+
+function feedCard(event) {
+  if (event.kind === "you") {
+    return el("article", { class: "feed-card you" },
+      el("div", { class: "feed-head", text: `You → ${event.session} · via ${event.door} · ${event.time}` }),
+      el("div", { text: event.text }),
+      el("small", { text: (event.attachments || []).join(", ") }));
+  }
+  const expanded = feedExpanded.has(event.id);
+  const selected = replyTo === event.id;
+  const card = el("article", { class: `feed-card${selected ? " selected" : ""}`, "data-id": event.id, style: `--dot: ${projectColor(event.session)}` });
+  const body = el("div", { class: `feed-body${expanded ? "" : " collapsed"}` });
+  body.innerHTML = feedMarkdown(event.text);
+  card.append(
+    el("div", { class: "feed-head" },
+      el("span", { class: "feed-name", text: event.session }),
+      el("span", { class: "feed-time", text: event.time })),
+    body);
+  if (!expanded && event.text.split("\n").length > 6) {
+    const more = el("button", { type: "button", class: "feed-more", text: "more" });
+    more.addEventListener("click", click => {
+      click.stopPropagation();
+      feedExpanded.add(event.id);
+      renderFeed();
+    });
+    card.append(more);
+  }
+  if (event.options?.length) {
+    const row = el("div", { class: "feed-opts" });
+    for (const n of event.options) {
+      const btn = el("button", { type: "button", class: "feed-opt", text: n, disabled: !!event.answered });
+      btn.addEventListener("click", async click => {
+        click.stopPropagation();
+        try {
+          await desktopApi("/desktop/option", { id: event.id, n });
+          feedEvents.set(event.id, { ...event, answered: n });
+          renderFeed();
+        } catch { /* poll may reconcile */ }
+      });
+      row.append(btn);
+    }
+    card.append(row);
+    if (event.answered) card.append(el("p", { class: "feed-answered", text: `answered ${event.answered}` }));
+  }
+  card.addEventListener("click", async () => {
+    try {
+      await desktopApi("/desktop/target", { session: event.session, reply_to: event.id });
+    } catch { /* poll */ }
+  });
+  return card;
+}
+
+function renderFeed() {
+  const box = $("feed");
+  const rows = [...feedEvents.values()].sort((a, b) => a.id - b.id);
+  if (!rows.length) {
+    box.replaceChildren(el("p", { class: "empty", text: "Project messages will show here." }));
+    return;
+  }
+  box.replaceChildren(...rows.map(feedCard));
+  box.lastElementChild?.scrollIntoView({ block: "nearest" });
+}
+
+async function syncFeed(after) {
+  if (feedBusy) return;
+  feedBusy = true;
+  try {
+    const data = await desktopApi(`/desktop/feed?after=${after}`);
+    for (const event of data.events || []) feedEvents.set(event.id, event);
+    feedLast = Math.max(after, ...(data.events || []).map(event => event.id));
+    renderFeed();
+  } catch { /* retry on next poll */ }
+  finally { feedBusy = false; }
+}
+
 function sessionTag(session) {
   const doing = sessionDoing(session);
-  const selected = session.name === aimed;
+  const selected = session.name === aimed && replyTo == null;
   const btn = el("button", {
     type: "button",
     class: `tag ${doing}${selected ? " aimed" : ""}`,
@@ -779,6 +970,10 @@ function sessionTag(session) {
     el("span", { class: "name", text: session.name }),
     doing === "waiting" ? el("span", { class: "waits", text: "waits" }) : null);
   btn.addEventListener("click", async () => {
+    if (pickingProject) {
+      pickingProject = false; aimed = session.name; replyTo = null;
+      await sendCompose(); return;
+    }
     btn.classList.add("pressed");
     setTimeout(() => btn.classList.remove("pressed"), 150);
     try {
@@ -804,14 +999,24 @@ function renderSessions(sessions) {
 async function poll() {
   try {
     const now = await desktopApi("/desktop/state");
+    if ((serverBoot !== undefined && serverBoot !== now.boot) || now.feed_last < feedLast) {
+      feedLast = 0; feedEvents.clear(); feedExpanded.clear(); renderFeed();
+    }
     serverBoot = now.boot;
     if (connected && linkBoot === undefined && serverBoot !== undefined) linkBoot = serverBoot;
     const back = pollFailCount > 0;
     pollFailCount = 0;
     lastPollVoice = now.voice;
-    aimed = now.aimed ?? null;
+    const aim = now.aimed;
+    aimed = aim?.session ?? null;
+    replyTo = aim?.reply_to ?? null;
     $("typed").placeholder = aimed ? `Message ${aimed}…` : "Message the Dispatcher…";
+    updateReplyChip();
     renderSessions(now.sessions);
+    if (typeof now.feed_last === "number" && now.feed_last !== feedLast) {
+      const after = feedLast;
+      await syncFeed(after);
+    }
     if (connected && !connecting && now.muted !== muted) {
       const wasMuted = muted;
       muted = now.muted;
@@ -838,28 +1043,69 @@ async function poll() {
   setTimeout(poll, 2000);
 }
 
-$("compose").addEventListener("submit", async event => {
-  event.preventDefault();
-  const field = $("typed");
-  const sentValue = field.value;
-  const text = sentValue.trim();
-  if (!text) return;
-  $("compose-note").classList.add("hidden");
-  const reply = await fetch("/desktop/say", {
-    method: "POST",
-    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
-    body: JSON.stringify({ text }),
-  });
-  if (reply.status === 409) {
-    $("compose-note").textContent = "Voice is not connected";
-    $("compose-note").classList.remove("hidden");
-    return;
+function composeNote(text) {
+  $("compose-note").textContent = text;
+  $("compose-note").classList.remove("hidden");
+}
+function renderFiles() {
+  $("file-chips").replaceChildren(...selectedFiles.map((file, index) => {
+    const chip = el("button", { type: "button", class: "chip", text: `${file.name} ✕`, "aria-label": `Remove ${file.name}` });
+    chip.onclick = () => { selectedFiles.splice(index, 1); renderFiles(); };
+    return chip;
+  }));
+}
+$("attach").onclick = () => $("files").click();
+$("files").onchange = () => {
+  for (const file of $("files").files) {
+    if (selectedFiles.length >= 5) { composeNote("Up to 5 files per send."); break; }
+    if (file.size > 20 * 1024 * 1024) { composeNote("Each file must be 20 MB or smaller."); continue; }
+    selectedFiles.push(file);
   }
-  if (!reply.ok) return;
-  if (field.value === sentValue) field.value = "";
-  say("you", text);
-});
+  $("files").value = ""; renderFiles();
+};
+let sendingCompose = false;
+async function sendCompose() {
+  if (sendingCompose) return;
+  const field = $("typed"), sentValue = field.value, text = sentValue.trim();
+  if (!text && !selectedFiles.length) return;
+  sendingCompose = true;
+  $("compose-note").classList.add("hidden");
+  try {
+    let body, headers = { authorization: `Bearer ${TOKEN}` };
+    const attaching = selectedFiles.length > 0;
+    if (attaching) {
+      body = new FormData();
+      selectedFiles.forEach(file => body.append("files", file));
+      body.append("text", text);
+      if (aimed) body.append("session", aimed);
+      if (replyTo != null) body.append("reply_to", replyTo);
+    } else {
+      headers["content-type"] = "application/json"; body = JSON.stringify({ text });
+    }
+    const reply = await fetch(attaching ? "/desktop/attach" : "/desktop/say", { method: "POST", headers, body });
+    if (reply.status === 409) {
+      pickingProject = attaching;
+      composeNote(attaching ? "Pick a project above to send these files." : "Voice is not connected");
+      $("sessions").scrollIntoView({ block: "nearest" }); return;
+    }
+    if (!reply.ok) { composeNote(reply.status === 413 ? "Up to 5 files, 20 MB each." : "Could not send. Try again."); return; }
+    if (attaching) {
+      const data = await reply.json(); composeNote(`Sent to ${data.session}`);
+      selectedFiles = []; renderFiles();
+    }
+    if (field.value === sentValue) field.value = "";
+  } catch { composeNote("Could not send. Try again."); }
+  finally { sendingCompose = false; }
+}
+$("compose").addEventListener("submit", event => { event.preventDefault(); void sendCompose(); });
+function fitViewport() {
+  if (window.visualViewport) document.body.style.height = `${window.visualViewport.height}px`;
+}
+window.visualViewport?.addEventListener("resize", fitViewport);
+window.visualViewport?.addEventListener("scroll", fitViewport);
+fitViewport();
 
+$("reply-clear").addEventListener("click", () => void clearReply());
 $("mic").addEventListener("click", async () => {
   if (!connected) { $("hint").textContent = ""; await connect(false, "tap"); return; }
   if (!muted) await muteHere();
@@ -889,19 +1135,23 @@ function playChime() {
 $("sound").addEventListener("click", () => {
   playChime();
   note("sound-allowed");
-  audio.play().then(() => $("sound").classList.add("hidden"));
+  ensureAudioPlaying("allow-sound");
 });
 $("setup").addEventListener("submit", testAndStart);
 $("anyway").addEventListener("click", start);
 $("tip-close").addEventListener("click", () => $("tip").classList.add("hidden"));
 $("gear").addEventListener("click", showSetup);
 $("back").addEventListener("click", event => { event.preventDefault(); $("setup").classList.add("hidden"); $("talk").classList.remove("hidden"); setTalking(true); });
-for (const event of ["pageshow", "focus", "online"]) addEventListener(event, wake);
+function onPageReturn(reason) {
+  wake();
+  ensureAudioPlaying(reason);
+}
+for (const event of ["pageshow", "focus", "online"]) addEventListener(event, () => onPageReturn(event));
 addEventListener("pagehide", () => { if (connected && !muted) void muteHere(); });
 document.addEventListener("visibilitychange", () => {
   note(document.hidden ? "hidden" : "visible");
   if (document.hidden) { if (connected && !muted) void muteHere(); }
-  else wake();
+  else onPageReturn("visible");
 });
 for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () => {
   if (id === "speed") speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length];

@@ -6,22 +6,53 @@ import asyncio
 import hmac
 import secrets
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from loguru import logger
+from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import desktop, settings
 from .bridge import Bridge
+from .feed import _ensure_inbox, _inbox_stamp, save_inbox_file
 from .processors import Microphone
-from .sessions import Session
+from .sessions import Session, mentioned
 
 SESSION_HEADER = "x-claude-session"
 PAGES = {"client": "/voice", "settings": "/settings"}
 REOPEN_SECONDS = 60.0
+
+
+class AttachmentParser(MultiPartParser):
+    """Bound each part while streaming, before accepting its bytes into a temp file."""
+
+    def on_part_begin(self) -> None:
+        super().on_part_begin()
+        self.part_bytes = 0
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        self.part_bytes += end - start
+        if self.part_bytes > 20 * 1024 * 1024:
+            raise MultiPartException("attachment too large")
+        super().on_part_data(data, start, end)
+
+
+@asynccontextmanager
+async def attachment_form(request: Request):
+    try:
+        form = await AttachmentParser(request.headers, request.stream(), max_files=5,
+                                      max_fields=3).parse()
+    except MultiPartException as error:
+        limited = error.message == "attachment too large" or "Too many files" in error.message
+        raise HTTPException(413 if limited else 400, error.message) from None
+    try:
+        yield form
+    finally:
+        await form.close()
 
 
 VOICES = (
@@ -239,7 +270,8 @@ def mount(
                                if bridge._hold_until not in (None, float("inf")) else None),
                 "prefs": {"speed": prefs.speed, "voice": prefs.voice},
                 "sessions": bridge.state(),
-                "aimed": bridge.aimed(),
+                "aimed": bridge.aimed_state(),
+                "feed_last": bridge.feed.last_id(),
                 "problems": len(settings.problems()),
                 "config": settings.version(),
                 "boot": boot,
@@ -308,6 +340,75 @@ def mount(
         await bridge.operator_text(text)
         return Response(status_code=204)
 
+    @app.post("/desktop/attach")
+    async def attach(request: Request) -> Response:
+        from starlette.datastructures import UploadFile
+
+        from .telegram import format_inbound
+
+        authorize(request)
+        async with attachment_form(request) as form:
+            files = form.getlist("files")
+            if len(files) > 5:
+                raise HTTPException(413, "at most 5 files")
+            if not files or any(not isinstance(file, UploadFile) for file in files):
+                raise HTTPException(400, "files required")
+            text = str(form.get("text") or "")
+            if len(text) > 2000:
+                raise HTTPException(400, "text too long")
+            live = bridge.sessions.live()
+            name = str(form.get("session") or "")
+            reply = None
+            if form.get("reply_to"):
+                try:
+                    reply = bridge.feed.get(int(str(form["reply_to"])))
+                except ValueError:
+                    raise HTTPException(400, "invalid reply_to") from None
+                if reply is None or reply.kind == "you":
+                    raise HTTPException(400, "invalid reply_to")
+                name = name or reply.session
+            matches = [item for item in live if item.name == name] if name else [
+                item for item in live if mentioned(item.name, text)
+            ]
+            if len(matches) != 1:
+                return JSONResponse({"error": "pick a project"}, status_code=409)
+            session = matches[0]
+            contents = []
+            for file in files:
+                assert isinstance(file, UploadFile)
+                data = await file.read(20 * 1024 * 1024 + 1)
+                if len(data) > 20 * 1024 * 1024:
+                    raise HTTPException(413, "at most 20 MB per file")
+                mime = file.content_type or ""
+                if not (mime.startswith(("image/", "text/", "video/"))
+                        or mime == "application/pdf"):
+                    raise HTTPException(415, "unsupported file type")
+                contents.append((file.filename or "file", data))
+            inbox = _ensure_inbox(session.folder)
+            paths = tuple(save_inbox_file(inbox, f"{_inbox_stamp()}-{name}", data)
+                          for name, data in contents)
+            context = reply if reply is not None and reply.session == session.name else None
+            body = format_inbound(
+                text or "(no caption)", wall=time.time(), channel="voice page",
+                reply_text=context.text if context else None,
+                reply_wall=context.wall if context else None, reply_header=True,
+                attachments=paths,
+            )
+            if not await bridge.send_task_direct(
+                session, body, text=text, door="page attachment",
+                attachments=paths,
+            ):
+                return JSONResponse({"error": "pick a project"}, status_code=409)
+            return JSONResponse({"session": session.name,
+                                 "names": [path.rsplit("/", 1)[-1] for path in paths]})
+
+    @app.get("/desktop/feed")
+    async def feed(request: Request, after: int = 0) -> Response:
+        authorize(request)
+        if after < 0:
+            raise HTTPException(400, "after: expected a non-negative integer")
+        return JSONResponse({"events": bridge.feed.after(after)})
+
     @app.post("/desktop/target")
     async def target(request: Request) -> Response:
         authorize(request)
@@ -323,10 +424,34 @@ def mount(
                 raise HTTPException(400, "session: expected a non-empty name or null")
         else:
             session = None
+        reply_to = body.get("reply_to")
+        if (reply_to is not None
+                and (type(reply_to) is not int or isinstance(reply_to, bool))):
+            raise HTTPException(
+                400, f"reply_to: expected an integer, got {type(reply_to).__name__}",
+            )
         try:
-            bridge.set_aim(session)
+            bridge.set_aim(session, reply_to=reply_to)
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
+        return Response(status_code=204)
+
+    @app.post("/desktop/option")
+    async def feed_option(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        event_id = body.get("id")
+        number = body.get("n")
+        if type(event_id) is not int or isinstance(event_id, bool):
+            raise HTTPException(400, f"id: expected an integer, got {type(event_id).__name__}")
+        if not isinstance(number, (str, int)) or isinstance(number, bool):
+            raise HTTPException(400, f"n: expected a number, got {type(number).__name__}")
+        number = str(number)
+        outcome = await bridge.send_feed_option(event_id, number)
+        if outcome == "answered":
+            raise HTTPException(409, "already answered")
+        if outcome == "missing":
+            raise HTTPException(404, "unknown or expired")
         return Response(status_code=204)
 
     @app.post("/desktop/hold")
