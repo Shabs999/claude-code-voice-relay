@@ -117,7 +117,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 @media (prefers-reduced-motion: reduce) { .tag .dot.working { animation: none; } }
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
-.log-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.log-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: var(--compose-h, 0px); }
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
@@ -164,8 +164,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
   padding: 0 16px max(12px, env(safe-area-inset-bottom));
   background: var(--wa-color-surface-default); border-top: 1px solid var(--wa-color-surface-border);
 }
-.compose-footer.compose-top { position: sticky; top: 0; bottom: auto; }
-#talk:has(.compose-top) .log { padding-bottom: 0; }
+.new-messages { position: absolute; right: 8px; bottom: calc(var(--compose-h, 0px) + 8px); z-index: 2; border-radius: 999px; padding: 6px 12px; background: var(--wa-color-surface-default); color: var(--brand); border: 1px solid var(--brand); cursor: pointer; }
 body.talking main { padding-bottom: 0; }
 #talk > :not(.log-wrap), .feed-card, .line { flex-shrink: 0; }
 .feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
@@ -245,6 +244,7 @@ body.talking main { padding-bottom: 0; }
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
+      <button type="button" id="new-messages" class="new-messages hidden">New ↓</button>
     </div>
     <div class="compose-footer" id="compose-footer">
       <div class="reply-chip hidden" id="reply-chip">
@@ -841,20 +841,19 @@ function measureCompose() {
   const compose = $("compose-footer");
   if (!compose.getClientRects().length) return;
   const log = $("log"), bottom = nearBottom();
-  const rect = compose.getBoundingClientRect(), vv = window.visualViewport;
+  const vv = window.visualViewport;
   const visible = vv ? vv.height + vv.offsetTop : innerHeight;
+  const inset = Math.max(0, innerHeight - visible);
+  compose.style.bottom = `${inset}px`;
+  const rect = compose.getBoundingClientRect();
+  document.querySelector(".log-wrap").style.maxHeight = `${Math.max(0, visible - document.querySelector(".log-wrap").getBoundingClientRect().top)}px`;
   document.documentElement.style.setProperty("--compose-h", `${rect.height}px`);
-  const reason = `bottom=${rect.bottom} visible=${visible} inner=${innerHeight} vv=${vv?.height ?? innerHeight} top=${vv?.offsetTop ?? 0}`;
+  const reason = `bottom=${Math.round(rect.bottom)} visible=${Math.round(visible)} keyboard=${inset > 150 ? "yes" : "no"}`;
   if (!composePositions.has(reason)) {
     composePositions.add(reason);
     note("compose-pos", reason);
   }
-  if (rect.bottom > visible + 4 && !compose.classList.contains("compose-top")) {
-    compose.classList.add("compose-top");
-    $("talk").insertBefore(compose, document.querySelector(".log-wrap"));
-    scheduleCompose();
-  }
-  if (bottom) log.scrollTop = log.scrollHeight;
+  followNewest(bottom);
 }
 function scheduleCompose() {
   if (!composeFrame) composeFrame = requestAnimationFrame(measureCompose);
@@ -864,12 +863,21 @@ new MutationObserver(scheduleCompose).observe($("log"), { childList: true });
 window.addEventListener("load", scheduleCompose);
 window.addEventListener("resize", scheduleCompose);
 window.visualViewport?.addEventListener("resize", scheduleCompose);
+window.visualViewport?.addEventListener("scroll", scheduleCompose);
 scheduleCompose();
 
 function nearBottom() {
   const log = $("log");
-  return log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+  return log.scrollHeight - log.scrollTop - log.clientHeight <= 150;
 }
+function followNewest(follow) {
+  const log = $("log");
+  if (follow) log.scrollTop = log.scrollHeight;
+  $("new-messages").classList.toggle("hidden", nearBottom());
+}
+$("new-messages").onclick = () => followNewest(true);
+$("log").addEventListener("scroll", () => $("new-messages").classList.toggle("hidden", nearBottom()));
+window.addEventListener("load", () => followNewest(true));
 function normalise(text) { return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(); }
 function matchesEvent(text, event) {
   const prefix = `${event.session}: `;
@@ -890,7 +898,7 @@ function say(who, text) {
     joined.dataset.segmentAt = now;
     joined.hidden = who === "agent" && /^[^\n:]+:$/.test(joined.textContent.trim());
     renderFeed();
-    if (bottom) log.scrollTop = log.scrollHeight;
+    followNewest(bottom);
     return;
   }
   const line = el("div", { class: `line ${who}`, text: text.trim() });
@@ -903,7 +911,7 @@ function say(who, text) {
   log.append(line);
   lastAgent = who === "agent" ? line : null;
   renderFeed();
-  if (bottom) log.scrollTop = log.scrollHeight;
+  followNewest(bottom);
 }
 
 const SESSION_RANK = { waiting: 0, working: 1, idle: 2 };
@@ -1057,7 +1065,8 @@ function renderFeed() {
   for (const event of feedEvents.values()) {
     const existing = box.querySelector(`[data-id="${event.id}"]`);
     const duplicate = [...box.children].find(node => event.kind === "you"
-      ? node.dataset.door === event.door && normalise(node.dataset.spoken || "") === normalise(event.text)
+      ? !node.dataset.id && node.dataset.door === event.door && node.dataset.spoken === event.text &&
+        Math.abs(Number(node.dataset.wall) - Number(event.wall)) <= 10
       : node.dataset.door === "dispatcher" && matchesEvent(node.dataset.spoken || "", event));
     const card = feedCard(event);
     card.dataset.id = event.id;
@@ -1071,7 +1080,7 @@ function renderFeed() {
   const ordered = [...box.children].sort((a, b) =>
     Number(a.dataset.wall) - Number(b.dataset.wall) || Number(a.dataset.arrival) - Number(b.dataset.arrival));
   box.append(...ordered);
-  if (bottom) box.scrollTop = box.scrollHeight;
+  followNewest(bottom);
 }
 
 async function syncFeed(after, version) {
@@ -1206,6 +1215,16 @@ async function sendCompose() {
   if (!text && !selectedFiles.length) return;
   sendingCompose = true;
   $("compose-note").classList.add("hidden");
+  const bottom = nearBottom();
+  const local = feedCard({ kind: "you", session: aimed || "Dispatcher", door: selectedFiles.length ? "page attachment" : "typing",
+    text, attachments: selectedFiles.map(file => file.name), time: new Date().toLocaleTimeString() });
+  local.dataset.wall = Date.now() / 1000;
+  local.dataset.arrival = ++conversationArrival;
+  local.dataset.door = selectedFiles.length ? "page attachment" : "typing";
+  local.dataset.spoken = text;
+  $("log").append(local);
+  followNewest(bottom);
+  let sent = false;
   try {
     let body, headers = { authorization: `Bearer ${TOKEN}` };
     const attaching = selectedFiles.length > 0;
@@ -1225,13 +1244,18 @@ async function sendCompose() {
       $("sessions").scrollIntoView({ block: "nearest" }); return;
     }
     if (!reply.ok) { composeNote(reply.status === 413 ? "Up to 5 files, 20 MB each." : "Could not send. Try again."); return; }
+    sent = true;
     if (attaching) {
       const data = await reply.json(); composeNote(`Sent to ${data.session}`);
       selectedFiles = []; renderFiles();
     }
     if (field.value === sentValue) field.value = "";
   } catch { composeNote("Could not send. Try again."); }
-  finally { sendingCompose = false; }
+  finally {
+    if (!sent) local.remove();
+    followNewest(bottom);
+    sendingCompose = false;
+  }
 }
 $("compose").addEventListener("submit", event => { event.preventDefault(); void sendCompose(); });
 

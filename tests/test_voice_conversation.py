@@ -8,6 +8,7 @@ def test_conversation_order_and_catchup(tmp_path):
     say = page.split('let conversationArrival = 0;', 1)[1].split('const SESSION_RANK', 1)[0]
     render = page.split('function renderFeed() {', 1)[1].split('async function syncFeed', 1)[0]
     matching = page.split('function normalise(text)', 1)[1].split('let conversationArrival', 1)[0]
+    follow = page.split('function followNewest(follow) {', 1)[1].split('$("new-messages").onclick', 1)[0]
     script = tmp_path / 'conversation.mjs'
     script.write_text('''import assert from 'node:assert/strict';
 class Node {
@@ -20,7 +21,7 @@ class Node {
   }
 }
 const log = {
-  children: [], scrollHeight: 0,
+  children: [], scrollHeight: 0, classList: { toggle() {} },
   get lastElementChild() { return this.children.at(-1); },
   append(...nodes) {
     for (const node of nodes) {
@@ -39,7 +40,7 @@ let lastAgent = null, conversationArrival = 0;
 const feedEvents = new Map();
 let now = 100000;
 Date.now = () => now;
-''' + 'function normalise(text)' + matching + 'function renderFeed() {' + render + say + '''
+''' + 'function followNewest(follow) {' + follow + 'function normalise(text)' + matching + 'function renderFeed() {' + render + say + '''
 say('agent', 'Voice link on');
 now += 3000;
 say('agent', 'While you were away:');
