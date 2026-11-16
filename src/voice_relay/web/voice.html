@@ -149,6 +149,12 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .feed-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: var(--wa-font-size-xs); }
 .feed-name { font-weight: var(--wa-font-weight-semibold); color: var(--dot); }
 .feed-time { color: var(--wa-color-text-quiet); margin-left: auto; }
+.feed-replay {
+  min-width: 44px; min-height: 44px; padding: 0; border: 0; background: none; color: var(--brand);
+  font: inherit; font-size: var(--wa-font-size-s); cursor: pointer; flex: none;
+}
+.feed-replay.playing { color: var(--dot); }
+.feed-replay-hint { margin: -2px 0 4px; font-size: var(--wa-font-size-xs); color: var(--wa-color-text-quiet); }
 .feed-body { overflow-wrap: anywhere; min-width: 0; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .feed-body { white-space: pre-wrap; }
 .feed-body ol { white-space: normal; padding-left: 24px; }
@@ -278,6 +284,8 @@ let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBo
 let selectedFiles = [], pickingProject = false, feedBusy = false;
 let feedVersion = 0;
 let feedLast = 0, feedEvents = new Map(), feedExpanded = new Set(), replyTo = null;
+let replayingId = null, feedReplayBusy = new Set();
+const FEED_REPLAY_KINDS = new Set(["answer", "waiting", "update"]);
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
 let speed = 1.5, voice = "ash";
@@ -770,11 +778,12 @@ async function openConnection(replace, reason) {
         ensureAudioPlaying("speech-arrived");
         show();
       },
-      onBotStoppedSpeaking() { speaking = false; lastAgent = null; show(); },
+      onBotStoppedSpeaking() { speaking = false; lastAgent = null; replayingId = null; show(); renderFeed(); },
       onDisconnected() {
         if (client !== attempt) return;
         note("disconnected", reason);
         client = null; transport = null; localMicStream = null; connected = false; speaking = false;
+        replayingId = null;
         if (wanted) retry(); else show();
       },
     },
@@ -926,11 +935,47 @@ function feedCard(event) {
   const preview = lines.slice(0, divider < 0 ? 3 : divider).join("\n");
   const body = el("div", { class: "feed-body" });
   body.innerHTML = feedMarkdown(expanded ? full : preview);
-  card.append(
-    el("div", { class: "feed-head" },
-      el("span", { class: "feed-name", text: event.session }),
-      el("span", { class: "feed-time", text: event.time })),
-    body);
+  const head = el("div", { class: "feed-head" }, el("span", { class: "feed-name", text: event.session }));
+  if (FEED_REPLAY_KINDS.has(event.kind)) {
+    const playing = replayingId === event.id;
+    const replay = el("button", {
+      type: "button",
+      class: `feed-replay${playing ? " playing" : ""}`,
+      "aria-label": "Play again",
+      text: playing ? "▮▮" : "▶",
+    });
+    replay.addEventListener("click", async click => {
+      click.stopPropagation();
+      try {
+        const reply = await fetch("/desktop/replay", {
+          method: "POST",
+          headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+          body: JSON.stringify({ id: event.id }),
+        });
+        if (reply.status === 204) {
+          replayingId = event.id;
+          feedReplayBusy.delete(event.id);
+          renderFeed();
+          return;
+        }
+        const data = await reply.json().catch(() => ({}));
+        if (reply.status === 409 && data.error === "busy") {
+          feedReplayBusy.add(event.id);
+          renderFeed();
+          setTimeout(() => {
+            feedReplayBusy.delete(event.id);
+            renderFeed();
+          }, 4000);
+        }
+      } catch { /* poll may reconcile */ }
+    });
+    head.append(replay);
+  }
+  head.append(el("span", { class: "feed-time", text: event.time }));
+  card.append(head, body);
+  if (feedReplayBusy.has(event.id)) {
+    card.append(el("p", { class: "feed-replay-hint", text: "Busy — tap again in a moment" }));
+  }
   if (!expanded && full !== preview) {
     const more = el("button", { type: "button", class: "feed-more", text: "more" });
     more.addEventListener("click", click => {

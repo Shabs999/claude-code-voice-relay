@@ -437,6 +437,22 @@ def mount(
             raise HTTPException(400, str(error)) from None
         return Response(status_code=204)
 
+    @app.post("/desktop/replay")
+    async def replay_feed(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        event_id = body.get("id")
+        if type(event_id) is not int or isinstance(event_id, bool):
+            raise HTTPException(400, f"id: expected an integer, got {type(event_id).__name__}")
+        outcome = await bridge.replay_feed(event_id)
+        if outcome == "missing":
+            raise HTTPException(404, "unknown or expired")
+        if outcome == "not connected":
+            return JSONResponse({"error": "voice not connected"}, status_code=409)
+        if outcome == "busy":
+            return JSONResponse({"error": "busy"}, status_code=409)
+        return Response(status_code=204)
+
     @app.post("/desktop/option")
     async def feed_option(request: Request) -> Response:
         authorize(request)

@@ -18,7 +18,7 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
-from .feed import Feed
+from .feed import REPLAY_KINDS, Feed, replay_text
 from .record import Line, filler, task_message
 from .sessions import ABORT, TASK, Session, Sessions, key, mentioned
 
@@ -453,6 +453,10 @@ class Bridge:
     def voice(self) -> bool:
         return self._worker is not None
 
+    def voice_busy(self) -> bool:
+        return (not self._quiet.is_set() or self._join
+                or (self._speaker is not None and not self._speaker.done()))
+
     def active(self) -> bool:
         """True while a voice client is connected or a session polls. Drops gone sessions."""
         if self.sessions.prune():
@@ -761,6 +765,20 @@ class Bridge:
             return False
         self._dispatch_task(session, message, asked=text, door=door, attachments=attachments)
         return True
+
+    async def replay_feed(self, event_id: int) -> str | None:
+        """Speak a feed event again; None on success, or an error token."""
+        event = self.feed.get(event_id)
+        if event is None or event.kind not in REPLAY_KINDS:
+            return "missing"
+        if not self.voice():
+            return "not connected"
+        if self.voice_busy():
+            return "busy"
+        text = replay_text(event, multi=len(self.sessions.all()) > 1)
+        if not await self.say(text):
+            return "not connected"
+        return None
 
     async def send_feed_option(self, event_id: int, number: str) -> str | None:
         """Send an option tap; returns None on success or an error token."""

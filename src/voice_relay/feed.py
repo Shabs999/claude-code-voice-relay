@@ -16,6 +16,11 @@ FEED_MAX = 300
 SPOKEN_MAX = 600
 OPTION_PATTERN = re.compile(r"^(\d+)\.\s+\S")
 FeedKind = Literal["answer", "waiting", "update", "you"]
+REPLAY_KINDS = frozenset({"answer", "waiting", "update"})
+
+
+def replay_text(event: FeedEvent, *, multi: bool) -> str:
+    return f"{event.session}: {event.spoken}" if multi else event.spoken
 
 
 def spoken_part(text: str) -> str:
