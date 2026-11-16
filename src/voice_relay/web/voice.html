@@ -118,7 +118,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
 .log-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: var(--compose-h, 0px); }
+.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: calc(var(--compose-h, 0px) + 12px); }
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
@@ -137,21 +137,17 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .compose .send:active { transform: scale(.97); }
 .compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--bad); }
 
-.feed-card {
-  border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
-  background: var(--wa-color-surface-lowered); padding: 10px 12px; text-align: left; cursor: pointer;
-  font: inherit; color: inherit; width: 100%;
-}
-.feed-card.you { align-self: flex-end; width: 88%; cursor: default; background: var(--wa-color-brand-fill-quiet, #eef0ff); overflow-wrap: anywhere; }
+.feed-card { text-align: left; cursor: pointer; color: inherit; }
+.feed-card.you { cursor: default; }
 .file-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: none; }
 .file-chips button { max-width: 100%; overflow-wrap: anywhere; }
 .attach { width: 44px; height: 44px; flex: none; font-size: 22px; background: none; color: inherit; border: 0; }
 .feed-card.selected { outline: 2px solid var(--dot); outline-offset: 0; }
-.feed-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; font-size: var(--wa-font-size-xs); }
+.feed-head { display: flex; align-items: baseline; gap: 4px; margin-bottom: 2px; font-size: var(--wa-font-size-xs); }
 .feed-name { font-weight: var(--wa-font-weight-semibold); color: var(--dot); }
-.feed-time { color: var(--wa-color-text-quiet); margin-left: auto; }
+.feed-time { color: var(--wa-color-text-quiet); }
 .feed-replay {
-  min-width: 44px; min-height: 44px; padding: 0; border: 0; background: none; color: var(--brand);
+  min-width: 44px; min-height: 44px; padding: 10px; margin: -10px 0; border: 0; background: none; color: var(--brand);
   font: inherit; font-size: var(--wa-font-size-s); cursor: pointer; flex: none;
 }
 .feed-replay.playing { color: var(--dot); }
@@ -169,8 +165,8 @@ body.talking main { padding-bottom: 0; }
 #talk > :not(.log-wrap), .feed-card, .line { flex-shrink: 0; }
 .feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
 .feed-body code { font-family: var(--wa-font-family-code); font-size: .92em; }
-.feed-more { margin-top: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; min-height: 44px; }
-.feed-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.feed-more { margin-left: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; }
+.feed-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .feed-opt {
   min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: var(--wa-border-radius-m);
   border: 1px solid var(--wa-color-surface-border); background: var(--wa-color-surface-default);
@@ -886,6 +882,7 @@ function matchesEvent(text, event) {
 }
 let conversationArrival = 0;
 function say(who, text) {
+  if (!text?.trim()) return;
   if (who === "agent" && [...feedEvents.values()].some(event => matchesEvent(text, event))) return;
   const log = $("log"), bottom = nearBottom();
   const now = Date.now() / 1000;
@@ -969,22 +966,25 @@ async function clearReply() {
 }
 
 function feedCard(event) {
+  if (event.kind === "you" && event.door === "voice") return null;
+  if (!event.text?.trim() && !event.attachments?.length) return null;
   if (event.kind === "you") {
-    return el("article", { class: "feed-card you" },
+    return el("article", { class: "line feed-card you" },
       el("div", { class: "feed-head", text: `You → ${event.session} · ${event.door === "telegram" ? "via Telegram" : ["typing", "typed"].includes(event.door) ? "typed" : `via ${event.door}`} · ${event.time}` }),
       el("div", { text: event.text }),
       el("small", { text: (event.attachments || []).join(", ") }));
   }
   const expanded = feedExpanded.has(event.id);
   const selected = replyTo === event.id;
-  const card = el("article", { class: `feed-card${selected ? " selected" : ""}`, "data-id": event.id, style: `--dot: ${projectColor(event.session)}` });
-  const lines = event.text.replace(/\r\n/g, "\n").split("\n");
+  const card = el("article", { class: `line agent feed-card${selected ? " selected" : ""}`, "data-id": event.id, style: `--dot: ${projectColor(event.session)}` });
+  const lines = (event.text || "").replace(/\r\n/g, "\n").split("\n");
   const divider = lines.indexOf("---");
   const full = lines.filter(line => line !== "---").join("\n");
-  const preview = lines.slice(0, divider < 0 ? 3 : divider).join("\n");
+  const preview = (event.spoken || lines.slice(0, divider < 0 ? 3 : divider).join("\n")).trim() || full;
   const body = el("div", { class: "feed-body" });
   body.innerHTML = feedMarkdown(expanded ? full : preview);
-  const head = el("div", { class: "feed-head" }, el("span", { class: "feed-name", text: event.session }));
+  const head = el("div", { class: "feed-head" }, el("span", { class: "feed-name", text: event.session }),
+    el("span", { class: "feed-time", text: `· ${event.time}` }));
   if (FEED_REPLAY_KINDS.has(event.kind)) {
     const playing = replayingId === event.id;
     const replay = el("button", {
@@ -1020,19 +1020,19 @@ function feedCard(event) {
     });
     head.append(replay);
   }
-  head.append(el("span", { class: "feed-time", text: event.time }));
   card.append(head, body);
   if (feedReplayBusy.has(event.id)) {
     card.append(el("p", { class: "feed-replay-hint", text: "Busy — tap again in a moment" }));
   }
-  if (!expanded && full !== preview) {
-    const more = el("button", { type: "button", class: "feed-more", text: "more" });
+  if (full !== preview) {
+    const more = el("button", { type: "button", class: "feed-more", text: expanded ? "less" : "more" });
     more.addEventListener("click", click => {
       click.stopPropagation();
-      feedExpanded.add(event.id);
+      if (expanded) feedExpanded.delete(event.id);
+      else feedExpanded.add(event.id);
       renderFeed();
     });
-    card.append(more);
+    body.append(more);
   }
   if (event.options?.length) {
     const row = el("div", { class: "feed-opts" });
@@ -1064,11 +1064,12 @@ function renderFeed() {
   const box = $("log"), bottom = nearBottom();
   for (const event of feedEvents.values()) {
     const existing = box.querySelector(`[data-id="${event.id}"]`);
+    const card = feedCard(event);
+    if (!card) { existing?.remove(); continue; }
     const duplicate = [...box.children].find(node => event.kind === "you"
       ? !node.dataset.id && node.dataset.door === event.door && node.dataset.spoken === event.text &&
         Math.abs(Number(node.dataset.wall) - Number(event.wall)) <= 10
       : node.dataset.door === "dispatcher" && matchesEvent(node.dataset.spoken || "", event));
-    const card = feedCard(event);
     card.dataset.id = event.id;
     card.dataset.wall = event.wall;
     if (event.kind === "you") { card.dataset.door = event.door; card.dataset.spoken = event.text; }
