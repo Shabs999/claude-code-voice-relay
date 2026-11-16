@@ -19,7 +19,7 @@ from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
 from .record import Line, filler
-from .sessions import ABORT, TASK, Session, Sessions, key
+from .sessions import ABORT, TASK, Session, Sessions, key, mentioned
 
 DEVELOPER = "developer"
 ANSWER = "Claude Code in {name} finished its turn. Its final text:\n\n{answer}"
@@ -182,6 +182,8 @@ class Bridge:
         self._linked_said: str | None = None
         self._linked_task: asyncio.Task[None] | None = None
         self._exchange: list[Line] = []
+        self._utterance = ""
+        self._current: Session | None = None
         self._fragment_at = 0.0
         self._spoke_at: float | None = None
         self._join = False
@@ -305,6 +307,7 @@ class Bridge:
             self._exchange[-1].text += " " + text
         else:
             self._exchange.append(Line(now, "Shahab", text))
+        self._utterance = self._exchange[-1].text
         self._fragment_at, self._join, self._relay = now, True, False
 
     def _operator_spoke_recently(self) -> bool:
@@ -437,6 +440,8 @@ class Bridge:
             self._schedule_linked()
         if new:
             self.sessions.release(session)
+            if session.running:
+                self._current = session
         return session.name
 
     async def unlink(self, session_id: str) -> None:
@@ -444,6 +449,8 @@ class Bridge:
             return
         session = self.sessions[session_id]
         self.sessions.unlink(session_id)
+        if self._current is session:
+            self._current = None
         self._linked_said = None
         dropped = time.time()
         self._last_dropped = (session.name, dropped)
@@ -537,7 +544,9 @@ class Bridge:
                 ))
                 + (" " + item.choices() if item.choices() else "") for item in items
             )
-            if not await self.say(content):
+            if await self.say(content):
+                self._current = items[-1].session
+            else:
                 for item in items:
                     self._remember_update(item)
 
@@ -570,7 +579,8 @@ class Bridge:
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
             if detail else ANSWER.format(name=session.name, answer=spoken)
         )
-        await self._append(content)
+        if await self._append(content):
+            self._current = session
         if self.held():
             self._remember("answer", session.name, spoken)
             return False
@@ -584,11 +594,30 @@ class Bridge:
         if self.held():
             self._remember("waiting", session.name, action)
             return False
-        await self._append(WAITING.format(name=session.name, action=action))
+        if await self._append(WAITING.format(name=session.name, action=action)):
+            self._current = session
         return await self.say(
             f"{session.name} waits for your OK at the screen to {action}.",
             missed=("waiting", session.name, action),
         )
+
+    def _resolve_session(self, name: str, text: str = "") -> Session | str:
+        found = self.sessions.find(name)
+        live = self.sessions.live()
+        if isinstance(found, Session):
+            return found
+        matches = [session for session in live
+                   if mentioned(session.name, text) or mentioned(session.name, self._utterance)]
+        if len(matches) == 1:
+            return matches[0]
+        if name.strip():
+            return found
+        if len(matches) > 1:
+            names = ", ".join(session.name for session in matches)
+            return f"{len(matches)} sessions are linked: {names}. Ask the operator which one."
+        if self._current in live:
+            return self._current
+        return found
 
     async def _send_task(self, params: FunctionCallParams) -> None:
         if not self._operator_spoke_recently():
@@ -596,7 +625,10 @@ class Bridge:
                            str(params.arguments.get("text", ""))[:80])
             await params.result_callback(f"not sent: {SPEECH_REFUSAL}")
             return
-        found = self.sessions.find(str(params.arguments.get("session") or ""))
+        found = self._resolve_session(
+            str(params.arguments.get("session") or ""),
+            str(params.arguments.get("text") or params.arguments.get("then") or ""),
+        )
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
             return
@@ -607,10 +639,11 @@ class Bridge:
         found.asked_text = str(params.arguments.get("text", ""))
         found.reminded = False
         found.send(TASK, QUOTE.format(text=found.asked_text))
+        self._current = found
         after = ", Claude Code starts it after the current turn" if busy else ""
-        await self.say("Sent.")
+        await self.say(f"Sent to {found.name}.")
         self._gag = True
-        await params.result_callback(f"sent to {found.name}{after} Say nothing.")
+        await params.result_callback(f'sent to {found.name}{after} Say only: "Sent to {found.name}."')
 
     async def _abort(self, params: FunctionCallParams) -> None:
         then = str(params.arguments.get("then") or "").strip()
@@ -619,7 +652,10 @@ class Bridge:
                            then[:80])
             await params.result_callback(f"not stopped: {SPEECH_REFUSAL}")
             return
-        found = self.sessions.find(str(params.arguments.get("session") or ""))
+        found = self._resolve_session(
+            str(params.arguments.get("session") or ""),
+            str(params.arguments.get("text") or params.arguments.get("then") or ""),
+        )
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
             return
@@ -633,6 +669,7 @@ class Bridge:
             found.reminded = False
             found.running = found.restarting = True
             found.send(TASK, QUOTE.format(text=then))
+            self._current = found
         sent = ", and the new instructions after it" if then else ""
         await self.say("Stopped, and sent." if then else "Stopped.")
         self._gag = True
@@ -782,6 +819,10 @@ class Bridge:
         self._replayed_at = replayed
         self._replayed_worker = self._worker
         if await self.say(self._briefing(self._missed)):
+            for _, kind, name, _, _ in sorted(self._missed, key=lambda item: item[4]):
+                if kind in {"answer", "waiting", "update-needs-you", "update-milestone", "update-done"}:
+                    self._current = next((s for s in self.sessions.live() if s.name == name),
+                                         self._current)
             self._missed = deque(
                 (item for item in self._missed
                  if item[0] > replayed),

@@ -40,8 +40,8 @@ async def test_send_confirmation_gags_until_operator_speaks():
     bridge.operator_said("run tests")
     call = Call(text="run tests")
     await bridge._send_task(call)
-    assert [f.text for f in worker.frames] == ["Sent."]
-    assert call.result.endswith(" Say nothing.")
+    assert [f.text for f in worker.frames] == ["Sent to shop."]
+    assert call.result.endswith(' Say only: "Sent to shop."')
     assert bridge.gagged()
     bridge.operator_said("repeat that")
     assert not bridge.gagged()

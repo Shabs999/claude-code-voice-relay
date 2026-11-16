@@ -154,3 +154,37 @@ class Sessions:
 def key(name: str) -> str:
     """Matches a spoken name to a folder name: case, spaces and punctuation do not count."""
     return re.sub(r"[\W_]+", "", name.lower())
+
+
+def _distance(left: str, right: str) -> int:
+    """Levenshtein distance for spoken project names."""
+    row = list(range(len(right) + 1))
+    for i, a in enumerate(left, 1):
+        following = [i]
+        for j, b in enumerate(right, 1):
+            following.append(min(following[-1] + 1, row[j] + 1,
+                                 row[j - 1] + (a != b)))
+        row = following
+    return row[-1]
+
+
+def mentioned(name: str, text: str) -> bool:
+    normalized = key(name)
+    if len(normalized) >= 6 and normalized in key(text):
+        return True
+    words = re.findall(r"[^\W_]+", text.lower())
+    for start in range(len(words)):
+        run = ""
+        for word in words[start:]:
+            run += word
+            if len(normalized) < 6:
+                if run == normalized:
+                    return True
+                if len(run) >= len(normalized):
+                    break
+                continue
+            if len(run) > len(normalized) + 2:
+                break
+            if abs(len(run) - len(normalized)) <= 2 and _distance(normalized, run) <= 2:
+                return True
+    return False

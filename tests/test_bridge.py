@@ -567,3 +567,88 @@ async def test_replay_failed_say_keeps_items(monkeypatch) -> None:
     monkeypatch.setattr(bridge, "say", disconnected)
     await bridge.replay()
     assert len(bridge._missed) == 1
+
+
+@pytest.mark.parametrize("session", [None, "", "unknown"])
+@pytest.mark.parametrize("source", ["text", "utterance", "current", "none"])
+async def test_send_resolves_spoken_project_or_current(session, source):
+    bridge, worker = await voiced("Handsfree", "Workspace")
+    bridge.operator_said("What is going on with the hands free project?"
+                         if source == "utterance" else "What is going on?")
+    if source == "current":
+        await bridge.answer(bridge.sessions["Workspace"], "Ready.")
+    call = Call(text="Hansfree, what's going on?" if source == "text" else "status")
+    if session is not None:
+        call.arguments["session"] = session
+    await bridge._send_task(call)
+    if session == "unknown" and source == "current":
+        assert "not sent: no linked session is named unknown." in call.result
+        assert await bridge.sessions["Workspace"].next(0.01) is None
+        return
+    if source == "none":
+        assert "Ask the operator which one." in call.result if not session else "no linked session" in call.result
+        assert bridge._current is None
+        return
+    name = "Workspace" if source == "current" else "Handsfree"
+    assert call.result == f'sent to {name} Say only: "Sent to {name}."'
+    assert bridge._current is bridge.sessions[name]
+    assert (await bridge.sessions[name].next(1))["kind"] == TASK
+    assert worker.frames[-1].text == f"Sent to {name}."
+    await bridge.unlink(name)
+    assert bridge._current is None
+    for task in bridge._drops.values():
+        task.cancel()
+
+
+async def test_explicit_session_wins_and_abort_uses_spoken_fallback():
+    bridge, _ = await voiced("Handsfree", "Workspace")
+    bridge.operator_said("Hands free status")
+    await bridge._send_task(Call(session="Workspace", text="Hansfree status"))
+    assert bridge._current is bridge.sessions["Workspace"]
+    await bridge._abort(Call())
+    assert (await bridge.sessions["Handsfree"].next(1))["kind"] == ABORT
+
+
+@pytest.mark.parametrize("source", ["text", "utterance"])
+@pytest.mark.parametrize("session", ["", "unknown"])
+async def test_multiple_mentions_do_not_use_current(source, session):
+    bridge, _ = await voiced("Handsfree", "Workspace", "Other")
+    bridge._current = bridge.sessions["Workspace"]
+    phrase = "handsfree and workspace both need checks"
+    bridge.operator_said(phrase if source == "utterance" else "run checks")
+    call = Call(session=session, text=phrase if source == "text" else "run checks")
+    await bridge._send_task(call)
+    if session:
+        assert call.result == "not sent: " + bridge.sessions.find(session)
+    else:
+        assert call.result == (
+            "not sent: 2 sessions are linked: Handsfree, Workspace. Ask the operator which one."
+        )
+    for linked in bridge.sessions.live():
+        assert await linked.next(0.01) is None
+
+
+@pytest.mark.parametrize("text,expected", [("shop needs checks", "sent"), ("run checks", "not sent")])
+async def test_unknown_explicit_session_with_one_linked_project(text, expected):
+    bridge, _ = await voiced("shop")
+    bridge._current = bridge.sessions["shop"]
+    bridge.operator_said("run checks")
+    call = Call(session="unknown", text=text)
+    await bridge._send_task(call)
+    assert call.result.startswith(expected)
+    if expected == "not sent":
+        assert call.result == "not sent: " + bridge.sessions.find("unknown")
+        assert await bridge.sessions["shop"].next(0.01) is None
+    else:
+        assert (await bridge.sessions["shop"].next(1))["kind"] == TASK
+
+
+@pytest.mark.parametrize("name,text,expected", [
+    ("Handsfree", "Hansfree", True), ("Handsfree", "hands free", True),
+    ("Handsfree", "hand fre", True), ("Handsfree", "hamster", False),
+    ("shop", "stop", False),
+    ("shop", "stopshop", False), ("shop", "the shop app", True),
+    ("shop", "the sh op app", True),
+])
+def test_spoken_project_matching(name, text, expected):
+    assert sessions.mentioned(name, text) is expected
