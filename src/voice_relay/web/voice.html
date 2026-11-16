@@ -24,9 +24,8 @@
   --wa-form-control-activated-color: #8b87ff; --wa-color-focus: #8b87ff;
 }
 * { box-sizing: border-box; }
-html, body { height: 100%; }
-html { overflow: hidden; }
-body { height: 100vh; height: 100dvh; overflow: hidden; width: 100%; }
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+body { height: 100vh; height: 100dvh; width: 100%; }
 body { margin: 0; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); display: flex; flex-direction: column; }
 .top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
 body.talking .top { display: none; }
@@ -62,9 +61,16 @@ a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
 .info:hover, .info:focus-visible { color: var(--wa-color-text-normal); border-color: var(--wa-color-text-normal); }
 .code::part(input) { font-family: var(--wa-font-family-code); font-size: var(--wa-font-size-s); }
 
-#talk { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+#talk { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+body.talking #talk { position: fixed; inset: 0; max-width: 460px; margin: 0 auto; width: 100%; pointer-events: none; z-index: 1; }
+body.talking #talk > * { pointer-events: auto; }
+.talk-header {
+  position: fixed; top: 0; left: 50%; z-index: 4; width: 100%; max-width: 460px;
+  transform: translateX(-50%);
+  padding: 0 16px; padding-top: env(safe-area-inset-top);
+  background: var(--wa-color-surface-default); border-bottom: 1px solid var(--wa-color-surface-border);
+}
 .talk-bar {
-  position: sticky; top: 0; z-index: 2; background: var(--wa-color-surface-default);
   display: flex; align-items: center; gap: 8px; padding: 6px 0; max-height: 56px; min-height: 44px;
 }
 .talk-status { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1; }
@@ -95,7 +101,13 @@ a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
 .sound-row wa-button { --wa-form-control-height: 28px; font-size: var(--wa-font-size-xs); }
 
 h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--wa-color-text-quiet); }
-.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; margin: 0; }
+.tags {
+  display: flex; flex-wrap: nowrap; gap: 6px; padding: 4px 0 8px; margin: 0;
+  overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; overscroll-behavior-x: contain;
+}
+.tags::-webkit-scrollbar { display: none; }
+.tags .tag, .tags .empty { flex: none; }
 .tag {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; margin: 0;
   border: 1px solid var(--wa-color-surface-border); border-radius: 999px; background: var(--wa-color-surface-lowered);
@@ -117,8 +129,16 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 @media (prefers-reduced-motion: reduce) { .tag .dot.working { animation: none; } }
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
-.log-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: calc(var(--compose-h, 0px) + 12px); }
+.log-wrap {
+  position: fixed; left: 0; right: 0; z-index: 1;
+  top: var(--header-h, 0px); bottom: var(--compose-h, 0px);
+  max-width: 460px; margin: 0 auto; padding: 0 16px;
+  display: flex; flex-direction: column; min-height: 0;
+}
+.log {
+  min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: 8px;
+}
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
@@ -135,7 +155,8 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
   cursor: pointer; flex: none;
 }
 .compose .send:active { transform: scale(.97); }
-.compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--bad); }
+.compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--wa-color-text-quiet); }
+.compose-note.bad { color: var(--bad); }
 
 .feed-card { text-align: left; cursor: pointer; color: inherit; }
 .feed-card.you { cursor: default; }
@@ -221,22 +242,24 @@ body.talking main { padding-bottom: 0; }
         <button class="gear" id="tip-close" aria-label="Close the tip" title="Close">✕</button>
       </div>
     </wa-callout>
-    <div class="talk-bar">
-      <button class="mic" id="mic" data-state="off" aria-label="Connect">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/>
-        </svg>
-      </button>
-      <div class="talk-status">
-        <div class="status" id="status" role="status">Connecting</div>
-        <div class="hint" id="hint"></div>
+    <div class="talk-header" id="talk-header">
+      <div class="talk-bar">
+        <button class="mic" id="mic" data-state="off" aria-label="Connect">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/>
+          </svg>
+        </button>
+        <div class="talk-status">
+          <div class="status" id="status" role="status">Connecting</div>
+          <div class="hint" id="hint"></div>
+        </div>
+        <div class="talk-end">
+          <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
+        </div>
       </div>
-      <div class="talk-end">
-        <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
-      </div>
+      <div class="sound-row"><wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button></div>
+      <div class="tags" id="sessions"></div>
     </div>
-    <div class="sound-row"><wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button></div>
-    <div class="tags" id="sessions"></div>
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
@@ -831,36 +854,44 @@ function show(phase) {
 }
 
 const composePositions = new Set();
-let composeFrame = 0;
-function measureCompose() {
+let composeFrame = 0, keyboardOpen = false;
+function measureLayout() {
   composeFrame = 0;
   const compose = $("compose-footer");
   if (!compose.getClientRects().length) return;
-  const log = $("log"), bottom = nearBottom();
+  const bottom = nearBottom();
   const vv = window.visualViewport;
   const visible = vv ? vv.height + vv.offsetTop : innerHeight;
   const inset = Math.max(0, innerHeight - visible);
+  const keyboard = inset > 150;
+  if (keyboardOpen && !keyboard) window.scrollTo(0, 0);
+  keyboardOpen = keyboard;
   compose.style.bottom = `${inset}px`;
+  const header = $("talk-header");
+  if (header?.getClientRects().length) {
+    document.documentElement.style.setProperty("--header-h", `${header.getBoundingClientRect().height}px`);
+  }
   const rect = compose.getBoundingClientRect();
-  document.querySelector(".log-wrap").style.maxHeight = `${Math.max(0, visible - document.querySelector(".log-wrap").getBoundingClientRect().top)}px`;
-  document.documentElement.style.setProperty("--compose-h", `${rect.height}px`);
-  const reason = `bottom=${Math.round(rect.bottom)} visible=${Math.round(visible)} keyboard=${inset > 150 ? "yes" : "no"}`;
+  document.documentElement.style.setProperty("--compose-h", `${rect.height + inset}px`);
+  const reason = `bottom=${Math.round(rect.bottom)} visible=${Math.round(visible)} keyboard=${keyboard ? "yes" : "no"}`;
   if (!composePositions.has(reason)) {
     composePositions.add(reason);
     note("compose-pos", reason);
   }
   followNewest(bottom);
 }
-function scheduleCompose() {
-  if (!composeFrame) composeFrame = requestAnimationFrame(measureCompose);
+function scheduleLayout() {
+  if (!composeFrame) composeFrame = requestAnimationFrame(measureLayout);
 }
-new ResizeObserver(scheduleCompose).observe($("compose-footer"));
-new MutationObserver(scheduleCompose).observe($("log"), { childList: true });
-window.addEventListener("load", scheduleCompose);
-window.addEventListener("resize", scheduleCompose);
-window.visualViewport?.addEventListener("resize", scheduleCompose);
-window.visualViewport?.addEventListener("scroll", scheduleCompose);
-scheduleCompose();
+new ResizeObserver(scheduleLayout).observe($("compose-footer"));
+new ResizeObserver(scheduleLayout).observe($("talk-header"));
+new MutationObserver(scheduleLayout).observe($("log"), { childList: true });
+new MutationObserver(scheduleLayout).observe($("sessions"), { childList: true, subtree: true });
+window.addEventListener("load", scheduleLayout);
+window.addEventListener("resize", scheduleLayout);
+window.visualViewport?.addEventListener("resize", scheduleLayout);
+window.visualViewport?.addEventListener("scroll", () => { window.scrollTo(0, 0); scheduleLayout(); });
+scheduleLayout();
 
 function nearBottom() {
   const log = $("log");
@@ -1189,9 +1220,14 @@ async function poll() {
   setTimeout(poll, 2000);
 }
 
-function composeNote(text) {
-  $("compose-note").textContent = text;
-  $("compose-note").classList.remove("hidden");
+let composeNoteTimer;
+function composeNote(text, error = false) {
+  clearTimeout(composeNoteTimer);
+  const box = $("compose-note");
+  box.textContent = text;
+  box.classList.toggle("bad", error);
+  box.classList.remove("hidden");
+  if (!error) composeNoteTimer = setTimeout(() => { box.classList.add("hidden"); box.textContent = ""; }, 3000);
 }
 function renderFiles() {
   $("file-chips").replaceChildren(...selectedFiles.map((file, index) => {
@@ -1203,8 +1239,8 @@ function renderFiles() {
 $("attach").onclick = () => $("files").click();
 $("files").onchange = () => {
   for (const file of $("files").files) {
-    if (selectedFiles.length >= 5) { composeNote("Up to 5 files per send."); break; }
-    if (file.size > 20 * 1024 * 1024) { composeNote("Each file must be 20 MB or smaller."); continue; }
+    if (selectedFiles.length >= 5) { composeNote("Up to 5 files per send.", true); break; }
+    if (file.size > 20 * 1024 * 1024) { composeNote("Each file must be 20 MB or smaller.", true); continue; }
     selectedFiles.push(file);
   }
   $("files").value = ""; renderFiles();
@@ -1216,7 +1252,6 @@ async function sendCompose() {
   if (!text && !selectedFiles.length) return;
   sendingCompose = true;
   $("compose-note").classList.add("hidden");
-  const bottom = nearBottom();
   const local = feedCard({ kind: "you", session: aimed || "Dispatcher", door: selectedFiles.length ? "page attachment" : "typing",
     text, attachments: selectedFiles.map(file => file.name), time: new Date().toLocaleTimeString() });
   local.dataset.wall = Date.now() / 1000;
@@ -1224,7 +1259,7 @@ async function sendCompose() {
   local.dataset.door = selectedFiles.length ? "page attachment" : "typing";
   local.dataset.spoken = text;
   $("log").append(local);
-  followNewest(bottom);
+  followNewest(true);
   let sent = false;
   try {
     let body, headers = { authorization: `Bearer ${TOKEN}` };
@@ -1241,20 +1276,20 @@ async function sendCompose() {
     const reply = await fetch(attaching ? "/desktop/attach" : "/desktop/say", { method: "POST", headers, body });
     if (reply.status === 409) {
       pickingProject = attaching;
-      composeNote(attaching ? "Pick a project above to send these files." : "Voice is not connected");
-      $("sessions").scrollIntoView({ block: "nearest" }); return;
+      composeNote(attaching ? "Pick a project above to send these files." : "Voice is not connected", true);
+      return;
     }
-    if (!reply.ok) { composeNote(reply.status === 413 ? "Up to 5 files, 20 MB each." : "Could not send. Try again."); return; }
+    if (!reply.ok) { composeNote(reply.status === 413 ? "Up to 5 files, 20 MB each." : "Could not send. Try again.", true); return; }
     sent = true;
     if (attaching) {
       const data = await reply.json(); composeNote(`Sent to ${data.session}`);
       selectedFiles = []; renderFiles();
-    }
+    } else composeNote(aimed ? `Sent to ${aimed}` : "Sent");
     if (field.value === sentValue) field.value = "";
-  } catch { composeNote("Could not send. Try again."); }
+  } catch { composeNote("Could not send. Try again.", true); }
   finally {
     if (!sent) local.remove();
-    followNewest(bottom);
+    followNewest(true);
     sendingCompose = false;
   }
 }
