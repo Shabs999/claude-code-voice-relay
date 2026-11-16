@@ -43,12 +43,11 @@ Date.now = () => now;
 ''' + 'function followNewest(follow) {' + follow + 'function normalise(text)' + matching + 'function renderFeed() {' + render + say + '''
 say('agent', 'Voice link on');
 now += 3000;
-say('agent', 'While you were away:');
-assert(log.lastElementChild.hidden);
+say('agent', 'While you were away: 10:01 AM, Shop: First item.');
+assert.equal(log.lastElementChild.textContent, 'Voice link on');
 now += 1000;
 say('agent', 'First item.');
-assert.equal(log.lastElementChild.textContent, 'While you were away: First item.');
-assert(!log.lastElementChild.hidden);
+assert.equal(log.lastElementChild.textContent, 'First item.');
 say('you', 'My reply');
 for (const event of [
   {id: 1, wall: 110, kind: 'answer', text: 'Newest'},
@@ -58,7 +57,7 @@ for (const event of [
 ]) feedEvents.set(event.id, {...event, session: 'Shop', spoken: event.text});
 renderFeed();
 assert.deepEqual(log.children.map(n => n.textContent),
-  ['Oldest', 'Voice link on', 'Tie', 'While you were away: First item.', 'My reply', 'Voice reply', 'Newest']);
+  ['Oldest', 'Voice link on', 'Tie', 'First item.', 'My reply', 'Voice reply', 'Newest']);
 feedEvents.get(1).wall = 95;
 renderFeed();
 assert.equal(log.children[1].textContent, 'Newest');

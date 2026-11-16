@@ -926,8 +926,12 @@ function matchesEvent(text, event) {
     normalise(text.slice(prefix.length)).slice(0, 40) === normalise(event.spoken).slice(0, 40);
 }
 let conversationArrival = 0;
+function isCatchupBriefing(text) {
+  return /^While you were away:/i.test(text.trim());
+}
 function say(who, text) {
   if (!text?.trim()) return;
+  if (who === "agent" && isCatchupBriefing(text)) return;
   if (who === "agent" && [...feedEvents.values()].some(event => matchesEvent(text, event))) return;
   const log = $("log"), bottom = nearBottom();
   const now = Date.now() / 1000;
@@ -1327,42 +1331,73 @@ async function sendCompose() {
 }
 $("compose").addEventListener("submit", event => { event.preventDefault(); void sendCompose(); });
 
-function feedSelectionPick() {
+function feedSelectionState() {
   const sel = document.getSelection();
-  if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return { pick: null, outcome: "empty" };
   const anchor = sel.anchorNode, focus = sel.focusNode;
-  if (!anchor || !focus) return null;
-  const bodyEl = (anchor.nodeType === Node.TEXT_NODE ? anchor.parentElement : anchor)
-    ?.closest?.(".feed-body");
-  if (!bodyEl) return null;
-  if (!bodyEl.contains(focus)) return null;
-  const card = bodyEl.closest(".feed-card[data-id]");
-  if (!card) return null;
-  const event = feedEvents.get(Number(card.dataset.id));
-  if (!event?.session) return null;
+  if (!anchor || !focus) return { pick: null, outcome: "empty" };
+  const anchorRoot = anchor.nodeType === Node.TEXT_NODE ? anchor.parentElement : anchor;
+  const focusRoot = focus.nodeType === Node.TEXT_NODE ? focus.parentElement : focus;
+  const anchorCard = anchorRoot?.closest?.(".feed-card[data-id]");
+  const focusCard = focusRoot?.closest?.(".feed-card[data-id]");
+  if (!anchorCard && !focusCard) return { pick: null, outcome: "outside-feed" };
+  if (!anchorCard || !focusCard || anchorCard !== focusCard) return { pick: null, outcome: "spans-cards" };
+  const event = feedEvents.get(Number(anchorCard.dataset.id));
+  if (!event?.session) return { pick: null, outcome: "no-session-card" };
   const text = sel.toString().trim().slice(0, 500);
-  return text ? { event, text } : null;
+  if (!text) return { pick: null, outcome: "empty" };
+  return { pick: { event, text }, outcome: `shown ${event.session}` };
 }
 
+let partSelectNoteTimer = null, partSelectClearTimer = null, lastPartSelectOutcome = null;
 function refreshPartialReplyButton() {
-  partialReplyPick = feedSelectionPick();
-  $("partial-reply").classList.toggle("hidden", !partialReplyPick);
+  const { pick, outcome } = feedSelectionState();
+  if (pick) {
+    clearTimeout(partSelectClearTimer);
+    partSelectClearTimer = null;
+    partialReplyPick = pick;
+    $("partial-reply").classList.remove("hidden");
+  } else if (partSelectClearTimer === null) {
+    partSelectClearTimer = setTimeout(() => {
+      partSelectClearTimer = null;
+      partialReplyPick = null;
+      $("partial-reply").classList.add("hidden");
+    }, 1500);
+  }
+  clearTimeout(partSelectNoteTimer);
+  partSelectNoteTimer = setTimeout(() => {
+    if (outcome !== lastPartSelectOutcome) {
+      lastPartSelectOutcome = outcome;
+      note("part-select", outcome);
+    }
+  }, 400);
 }
 
-document.addEventListener("selectionchange", () => refreshPartialReplyButton());
+document.addEventListener("selectionchange", refreshPartialReplyButton);
 
-$("partial-reply").addEventListener("click", async () => {
+async function replyToSelectedPart() {
   const pick = partialReplyPick;
   if (!pick) return;
+  clearTimeout(partSelectClearTimer);
+  partSelectClearTimer = null;
+  partialReplyPick = null;
+  $("partial-reply").classList.add("hidden");
+  document.getSelection()?.collapseToEnd();
+  $("typed").focus();
   try {
     await desktopApi("/desktop/target", {
       session: pick.event.session, reply_to: pick.event.id, quote: pick.text,
     });
-    document.getSelection()?.collapseToEnd();
-    refreshPartialReplyButton();
-    $("typed").focus();
     await poll();
   } catch { /* poll */ }
+}
+
+$("partial-reply").addEventListener("pointerdown", event => {
+  event.preventDefault();
+  void replyToSelectedPart();
+});
+$("partial-reply").addEventListener("click", event => {
+  if (event.detail === 0) void replyToSelectedPart();
 });
 
 $("compose-quote-clear").addEventListener("click", async () => {
