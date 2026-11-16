@@ -1053,11 +1053,15 @@ function feedCard(event) {
       const btn = el("button", { type: "button", class: "feed-opt", text: `${n} · ${label}`, disabled: !!event.answered });
       btn.addEventListener("click", async click => {
         click.stopPropagation();
+        for (const option of row.querySelectorAll(".feed-opt")) option.disabled = true;
         try {
           await desktopApi("/desktop/option", { id: event.id, n });
           feedEvents.set(event.id, { ...event, answered: n });
           renderFeed();
-        } catch { /* poll may reconcile */ }
+        } catch {
+          for (const option of row.querySelectorAll(".feed-opt")) option.disabled = false;
+          /* poll may reconcile */
+        }
       });
       row.append(btn);
     }

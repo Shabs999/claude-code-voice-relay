@@ -218,6 +218,7 @@ class Bridge:
         self._notices: set[asyncio.Task[bool]] = set()
         self._telegram: Any = None
         self.feed = Feed()
+        self._answering: set[int] = set()
         self._aimed_reply_to: int | None = None
 
     def held(self) -> bool:
@@ -795,7 +796,7 @@ class Bridge:
         event = self.feed.get(event_id)
         if event is None:
             return "missing"
-        if event.answered is not None:
+        if event.answered is not None or event_id in self._answering:
             return "answered"
         if number not in event.options:
             return "missing"
@@ -808,10 +809,14 @@ class Bridge:
             message_time=event.time,
             channel="voice page",
         )
-        if not await self.send_task_direct(session, body, text=number):
-            return "missing"
-        self.feed.mark_answered(event_id, number)
-        return None
+        self._answering.add(event_id)
+        try:
+            if not await self.send_task_direct(session, body, text=number):
+                return "missing"
+            self.feed.mark_answered(event_id, number)
+            return None
+        finally:
+            self._answering.discard(event_id)
 
     async def _send_task(self, params: FunctionCallParams) -> None:
         utterance = " ".join(re.findall(r"\w+", self._utterance.casefold()))

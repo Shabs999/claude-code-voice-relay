@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -117,6 +119,48 @@ async def test_option_tap(bridge) -> None:
     assert "voice page" in cmd["text"]
     assert await bridge.send_feed_option(event_id, "2") == "answered"
     assert await bridge.send_feed_option(999, "1") == "missing"
+
+@pytest.mark.parametrize("numbers", [("1", "1"), ("1", "2")])
+async def test_option_tap_concurrent(bridge, monkeypatch, numbers) -> None:
+    session, _ = bridge.sessions.link("s", "shop", "/tmp")
+    session.polls = 1
+    bridge.feed.record_answer(session, "Which?\n1. one\n2. two\n")
+    event_id = bridge.feed.last_id()
+    calls = 0
+
+    async def send(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return True
+
+    monkeypatch.setattr(bridge, "send_task_direct", send)
+    results = await asyncio.gather(
+        *(bridge.send_feed_option(event_id, number) for number in numbers)
+    )
+    assert calls == 1
+    assert results == [None, "answered"]
+
+
+async def test_option_tap_failure_releases_claim(bridge, monkeypatch) -> None:
+    session, _ = bridge.sessions.link("s", "shop", "/tmp")
+    session.polls = 1
+    bridge.feed.record_answer(session, "Which?\n1. one\n2. two\n")
+    event_id = bridge.feed.last_id()
+    calls = 0
+
+    async def send(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    monkeypatch.setattr(bridge, "send_task_direct", send)
+    assert await bridge.send_feed_option(event_id, "1") == "missing"
+    assert bridge.feed.get(event_id).answered is None
+    assert await bridge.send_feed_option(event_id, "2") is None
+    assert calls == 2
+    assert bridge.feed.get(event_id).answered == "2"
+
 
 async def test_answered_changes_return_loaded_event(bridge, monkeypatch) -> None:
     monkeypatch.setattr(settings, "environment", lambda: {})
