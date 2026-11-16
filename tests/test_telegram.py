@@ -808,3 +808,109 @@ async def test_inbox_error_does_not_stop_polling(monkeypatch, tmp_path) -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.parametrize("kind", [
+    "answer_voice", "split", "sent", "heard", "update", "update_voice", "waiting", "dnd",
+])
+async def test_reply_to_project_message(monkeypatch, tmp_path, kind) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    await _link(bridge, "other", "s2")
+    session = bridge.sessions["sid"]
+    spoken = "Here is the spoken explanation."
+    source = spoken + "\n---\nWritten details."
+    if kind == "split":
+        await door.on_answer(session, "First part. " * 500)
+        target = [i for i, (method, _) in enumerate(api.calls, 1) if method == "sendMessage"][1]
+    elif kind in ("sent", "heard"):
+        if kind == "sent":
+            await door._dispatch(_msg("shop do this"))
+        else:
+            await door._dispatch(_voice_msg())
+        await session.commands.get()
+        label = "Sent to" if kind == "sent" else "Heard:"
+        target = next(i for i, (_, params) in enumerate(api.calls, 1)
+                      if str(params.get("text", "")).startswith(label))
+    elif kind == "waiting":
+        await door.on_waiting(session, "approve this")
+        target = len(api.calls)
+    elif kind.startswith("update"):
+        await door.on_update(session, "milestone", spoken, None)
+        target = 1 if kind == "update" else 2
+    else:
+        if kind == "dnd":
+            door.map.dnd = True
+            await door.on_answer(session, source)
+            queued_wall = door.map.dnd_queue[0]["wall"]
+            door.map.dnd = False
+            await door._flush_dnd()
+        else:
+            await door.on_answer(session, source)
+        target = len(api.calls)
+    mapped = door.map.messages[str(target)]
+    assert mapped["session"] == "shop"
+    assert telegram.MapStore.load(door.map.path).messages[str(target)] == mapped
+    reply = {"message_id": target}
+    if kind in ("answer_voice", "update_voice", "dnd"):
+        reply.update(voice={"file_id": "outgoing"}, caption="shop")
+        assert mapped["excerpt"] == spoken
+        parent = api.calls[target - 1][1]["reply_to_message_id"]
+        assert mapped["wall"] == door.map.messages[str(parent)]["wall"]
+        if kind == "dnd":
+            assert mapped["wall"] == queued_wall
+    await door._dispatch(_msg("What is this about?", mid=100, reply_to=reply))
+    command = session.commands.get_nowait()
+    assert "replying to your message" in command["text"]
+    assert "> " + mapped["excerpt"].splitlines()[0] in command["text"]
+    assert bridge.sessions["s2"].commands.empty()
+
+
+async def test_reply_to_picker_stays_unmapped(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    await door._dispatch(_msg("hello"))
+    picker_id = len(api.calls)
+    assert str(picker_id) not in door.map.messages
+    await door._dispatch(_msg("What is this about?", mid=100,
+                              reply_to={"message_id": picker_id, "text": "Which project?"}))
+    assert api.calls[-1][1]["text"] == "Which project?"
+    assert bridge.sessions["sid"].commands.empty()
+
+
+async def test_heard_maps_after_project_pick(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path, openai=FakeOpenAI(transcript="do this"))
+    await _link(bridge)
+    await door._dispatch(_voice_msg())
+    assert not door.map.messages
+    choice = api.calls[-1][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    await door._callback({"id": "q", "from": {"id": 42}, "data": choice})
+    assert door.map.messages["1"]["session"] == "shop"
+    await bridge.sessions["sid"].commands.get()
+    await door._dispatch(_msg("explain", mid=100, reply_to={"message_id": 1}))
+    assert "> Heard: do this" in bridge.sessions["sid"].commands.get_nowait()["text"]
+
+
+async def test_multipart_voice_response_is_mapped(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, _ = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    door.map.remember_message(10, session="shop", text="answer", wall=1_700_000_000.0)
+
+    async def respond(request):
+        assert request.url.path.endswith("/sendVoice")
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 11}})
+
+    client = telegram.HttpxTelegram("test-token")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    door.api = client
+    try:
+        await door._voice_reply("shop", "Spoken.\n---\nDetails.", reply_to=10)
+    finally:
+        await client.close()
+    assert door.map.messages["11"] == {
+        "session": "shop", "excerpt": "Spoken.",
+        "wall": 1_700_000_000.0, "time": telegram.clock(1_700_000_000.0),
+    }

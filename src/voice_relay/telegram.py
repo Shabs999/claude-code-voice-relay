@@ -501,8 +501,10 @@ class Door:
 
     async def _deliver_answer(
         self, session: Session, body: str, *, spoken_source: str | None = None,
+        wall: float | None = None,
     ) -> None:
         assert self.api is not None and self.map is not None
+        wall = time.time() if wall is None else wall
         header = f"<b>{escape_html(session.name)}</b>"
         chunks = split_outbound(markdown_html(body), limit=SEND_LIMIT - len(header) - 1)
         keyboard = numbered_keyboard(spoken_source if spoken_source is not None else body)
@@ -524,7 +526,7 @@ class Door:
                 header + "\n" + chunk, reply_markup=reply_markup,
             )
             if last_id is not None:
-                self.map.remember_message(last_id, session=session.name, text=body)
+                self.map.remember_message(last_id, session=session.name, text=body, wall=wall)
         if last_id is not None:
             await self._voice_reply(
                 session.name, spoken_source or body, reply_to=last_id,
@@ -557,6 +559,7 @@ class Door:
     async def _deliver_update(
         self, session: Session, text: str, *, spoken_source: str,
         options: list[str] | None,
+        wall: float | None = None,
     ) -> None:
         assert self.api is not None and self.map is not None
         body = f"<b>{escape_html(session.name)}</b>: {escape_html(text)}"
@@ -579,7 +582,7 @@ class Door:
             ]}
         last_id = await self._send(body, reply_markup=reply_markup)
         if last_id is not None:
-            self.map.remember_message(last_id, session=session.name, text=text)
+            self.map.remember_message(last_id, session=session.name, text=spoken_source, wall=wall)
             await self._voice_reply(session.name, spoken_source, reply_to=last_id)
 
     async def on_waiting(self, session: Session, action: str) -> None:
@@ -596,7 +599,7 @@ class Door:
             })
             return
         text = f"<b>{escape_html(session.name)}</b> is waiting on you: {escape_html(action)}"
-        await self._send(text)
+        await self._send(text, session=session.name)
 
     async def _send(
         self,
@@ -605,6 +608,7 @@ class Door:
         chat_id: int | None = None,
         reply_to: int | None = None,
         reply_markup: dict | None = None,
+        session: str | None = None,
     ) -> int | None:
         assert self.api is not None
         target = chat_id if chat_id is not None else self.user_id
@@ -640,11 +644,17 @@ class Door:
             except Exception as retry_error:
                 logger.warning("telegram: send failed: {}", type(retry_error).__name__)
                 return None
-        return int(result.get("message_id", 0)) or None
+        message_id = int(result.get("message_id", 0)) or None
+        if message_id is not None and session is not None and self.map is not None:
+            self.map.remember_message(
+                message_id, session=session,
+                text=html.unescape(re.sub(r"<[^>]*>", "", text)),
+            )
+        return message_id
 
     async def _send_voice(
         self, audio: bytes, *, caption: str, reply_to: int | None = None,
-    ) -> None:
+    ) -> int | None:
         assert self.api is not None and self.user_id is not None
         params: dict[str, Any] = {
             "chat_id": self.user_id,
@@ -661,14 +671,16 @@ class Door:
                     files={"voice": ("voice.ogg", audio, "audio/ogg")},
                 )
                 response.raise_for_status()
-                return
-            await client.call(
-                "sendVoice",
-                voice=audio,
-                **params,
-            )
+                payload = response.json()
+                if not payload.get("ok"):
+                    return None
+                result = payload.get("result", {})
+            else:
+                result = await client.call("sendVoice", voice=audio, **params)
+            return int(result.get("message_id", 0)) or None
         except Exception as error:
             logger.warning("telegram: voice send failed: {}", type(error).__name__)
+            return None
 
     async def _voice_reply(self, session_name: str, body: str, *, reply_to: int) -> None:
         spoken = _spoken_part(body)
@@ -690,7 +702,12 @@ class Door:
         except Exception as error:
             logger.warning("telegram: tts failed: {}", type(error).__name__)
             return
-        await self._send_voice(audio, caption=session_name, reply_to=reply_to)
+        message_id = await self._send_voice(audio, caption=session_name, reply_to=reply_to)
+        if message_id is not None and self.map is not None:
+            answer = self.map.messages.get(str(reply_to), {})
+            self.map.remember_message(
+                message_id, session=session_name, text=spoken, wall=answer.get("wall"),
+            )
 
     async def _transcribe_voice(self, message: dict[str, Any]) -> str | None:
         assert self.api is not None and self.openai is not None
@@ -756,6 +773,7 @@ class Door:
             await self._deliver_answer(
                 session, _strip_rule_lines(str(item.get("text", ""))),
                 spoken_source=str(item.get("text", "")),
+                wall=item.get("wall"),
             )
         for item in updates:
             session = next(
@@ -767,6 +785,7 @@ class Door:
             await self._deliver_update(
                 session, str(item.get("text", "")), spoken_source=spoken,
                 options=item.get("options"),
+                wall=item.get("wall"),
             )
 
     async def _poll_loop(self) -> None:
@@ -908,11 +927,11 @@ class Door:
                 reply_to=message.get("message_id"),
             )
             return
-        await self._send(
+        heard_id = await self._send(
             f"Heard: {escape_html(transcript)}", reply_to=message.get("message_id"),
         )
         await self._deliver_inbound(
-            transcript, message, channel="Telegram voice note",
+            transcript, message, channel="Telegram voice note", heard_id=heard_id,
         )
 
     async def _flush_album(self, key: str) -> None:
@@ -974,6 +993,7 @@ class Door:
             return
         await self._send(
             f"Sent to {escape_html(session.name)}.", reply_to=lead.get("message_id"),
+            session=session.name,
         )
 
     async def _save_attachments(
@@ -1042,11 +1062,12 @@ class Door:
         *,
         channel: str = "Telegram",
         attachments: tuple[str, ...] = (),
+        heard_id: int | None = None,
     ) -> None:
         session = self._route(text, message)
         if session == "pending":
             await self._offer_projects(
-                text, message, attachments=attachments, channel=channel,
+                text, message, attachments=attachments, channel=channel, heard_id=heard_id,
             )
             return
         if isinstance(session, str):
@@ -1061,8 +1082,11 @@ class Door:
                 reply_to=message.get("message_id"),
             )
             return
+        if heard_id is not None and self.map is not None:
+            self.map.remember_message(heard_id, session=session.name, text=f"Heard: {text}")
         await self._send(
             f"Sent to {escape_html(session.name)}.", reply_to=message.get("message_id"),
+            session=session.name,
         )
 
     async def _inbound_text(self, text: str, message: dict[str, Any]) -> None:
@@ -1104,7 +1128,7 @@ class Door:
             if mapped:
                 reply_wall = float(mapped.get("wall", reply.get("date", wall)))
                 mapped_excerpt = mapped.get("excerpt")
-        if not reply_text and mapped_excerpt:
+        if mapped_excerpt and (not reply_text or reply.get("voice")):
             reply_text = mapped_excerpt
         if reply.get("message_id") and reply_text:
             if reply_wall is None:
@@ -1130,12 +1154,14 @@ class Door:
         media_messages: list[dict[str, Any]] | None = None,
         attachments: tuple[str, ...] = (),
         channel: str = "Telegram",
+        heard_id: int | None = None,
     ) -> None:
         assert self.map is not None
         pending_id = secrets.token_hex(4)
         choices = [session.name for session in self.bridge.sessions.live()]
         self.map.pending[pending_id] = {
             "kind": "pick", "choices": choices,
+            "heard_id": heard_id,
             "text": text,
             "message_id": message.get("message_id"),
             "at": time.time(),
@@ -1235,6 +1261,10 @@ class Door:
                 parts[2], wall=time.time(), message_time=pending["time"],
             )
         sent = await self.bridge.send_task_direct(found, body)
+        if sent and pending.get("heard_id") is not None:
+            self.map.remember_message(
+                pending["heard_id"], session=found.name, text=f"Heard: {pending['text']}",
+            )
         await self._reply(
             "answerCallbackQuery", callback_query_id=query["id"],
             text=f"Sent to {found.name}." if sent else f"{found.name} is not linked right now.",
