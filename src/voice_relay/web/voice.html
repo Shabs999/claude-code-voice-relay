@@ -268,7 +268,7 @@ body.talking main { padding-bottom: 0; }
     <div class="compose-footer" id="compose-footer">
       <div class="reply-chip hidden" id="reply-chip">
         <span id="reply-label"></span>
-        <button type="button" id="reply-clear" aria-label="Clear reply">✕</button>
+        <button type="button" id="reply-clear" aria-label="Clear project target">✕</button>
       </div>
       <div class="file-chips" id="file-chips"></div>
       <input id="files" type="file" multiple accept="image/*,application/pdf,text/*,video/*" hidden>
@@ -986,14 +986,15 @@ function feedMarkdown(text) {
 
 function updateReplyChip() {
   const chip = $("reply-chip");
-  if (replyTo != null && aimed) {
-    $("reply-label").textContent = `Replying to ${aimed}`;
+  if (aimed) {
+    $("reply-label").textContent = replyTo != null ? `Replying to ${aimed}` : `To: ${aimed}`;
+    chip.style.color = projectColor(aimed);
     chip.classList.remove("hidden");
   } else chip.classList.add("hidden");
 }
 
 async function clearReply() {
-  try { await desktopApi("/desktop/target", { session: null }); } catch { /* poll */ }
+  try { await desktopApi("/desktop/target", { session: null }); await poll(); } catch { /* poll */ }
 }
 
 function feedCard(event) {
@@ -1086,6 +1087,7 @@ function feedCard(event) {
   card.addEventListener("click", async () => {
     try {
       await desktopApi("/desktop/target", { session: event.session, reply_to: event.id });
+      await poll();
     } catch { /* poll */ }
   });
   return card;
@@ -1151,6 +1153,7 @@ function sessionTag(session) {
     setTimeout(() => btn.classList.remove("pressed"), 150);
     try {
       await desktopApi("/desktop/target", { session: selected ? null : session.name });
+      await poll();
     } catch { /* poll will reconcile */ }
   });
   return btn;
@@ -1182,6 +1185,7 @@ async function poll() {
     const back = pollFailCount > 0;
     pollFailCount = 0;
     lastPollVoice = now.voice;
+    const previousAim = aimed;
     const aim = now.aimed;
     aimed = aim?.session ?? null;
     const previousReply = replyTo;
@@ -1190,6 +1194,11 @@ async function poll() {
     $("typed").placeholder = aimed ? `Message ${aimed}…` : "Message the Dispatcher…";
     updateReplyChip();
     renderSessions(now.sessions);
+    if (aimed && aimed !== previousAim) {
+      [...$("sessions").querySelectorAll("[data-session]")]
+        .find(tag => tag.dataset.session === aimed)
+        ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
     if (typeof now.feed_last === "number" && (now.feed_last !== feedLast || now.feed_version !== feedVersion)) {
       const after = feedLast;
       await syncFeed(after, now.feed_version);
@@ -1286,6 +1295,7 @@ async function sendCompose() {
       selectedFiles = []; renderFiles();
     } else composeNote(aimed ? `Sent to ${aimed}` : "Sent");
     if (field.value === sentValue) field.value = "";
+    await poll();
   } catch { composeNote("Could not send. Try again.", true); }
   finally {
     if (!sent) local.remove();

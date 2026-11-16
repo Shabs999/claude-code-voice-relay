@@ -814,6 +814,15 @@ class Bridge:
         return None
 
     async def _send_task(self, params: FunctionCallParams) -> None:
+        utterance = " ".join(re.findall(r"\w+", self._utterance.casefold()))
+        if len(utterance.split()) <= 6 and (
+            utterance in {"say it again", "repeat that", "again", "what did it ask",
+                          "tell me more", "stop", "mute"}
+            or (utterance.startswith("play ") and utterance.endswith(" again"))
+        ):
+            await params.result_callback(
+                "not sent: this is for you, not a project — answer it yourself")
+            return
         if not self._operator_spoke_recently():
             logger.warning("task refused: no operator speech in the last 90 s (text: {})",
                            str(params.arguments.get("text", ""))[:80])

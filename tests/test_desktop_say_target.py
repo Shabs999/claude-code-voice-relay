@@ -114,3 +114,61 @@ async def test_aim_cleared_after_send(bridge) -> None:
     call = Call(text="run checks")
     await bridge._send_task(call)  # type: ignore[arg-type]
     assert bridge.aimed() is None
+
+
+async def test_typed_send_clears_aim_and_state(bridge, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "environment", lambda: {})
+    monkeypatch.setattr(settings, "problems", lambda: [])
+    monkeypatch.setattr(settings, "version", lambda: "test")
+    bridge.attach(Worker())
+    bridge.sessions.link("two", "Handsfree", "")
+    app = FastAPI()
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token="test-token",
+                 port=7860, poll=0)
+    headers = {"authorization": "Bearer test-token"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://localhost:7860") as client:
+        await client.post("/desktop/target", headers=headers,
+                          json={"session": "Handsfree"})
+        response = await client.post("/desktop/say", headers=headers,
+                                     json={"text": "run checks"})
+        assert response.status_code == 204
+        call = Call(text="run checks")
+        await bridge._send_task(call)
+        assert call.result.startswith("sent to Handsfree")
+        assert bridge._aimed is None
+        state = (await client.get("/desktop/state", headers=headers)).json()
+        assert state["aimed"] is None
+        assert bridge.feed.after(0)[-1]["session"] == "Handsfree"
+
+
+@pytest.mark.parametrize("aim", [False, True])
+@pytest.mark.parametrize("text", [
+    "Say it again!", "  REPEAT   that. ", "again", "play the Yacht Club answer again",
+    "what did it ask?", "tell me more", "stop", "mute",
+])
+async def test_dispatcher_phrase_never_sent(bridge, aim, text) -> None:
+    bridge.attach(Worker())
+    if aim:
+        bridge.set_aim("one")
+    before = bridge.aimed_state()
+    bridge.operator_said(text)
+    call = Call(session="one", text="run checks")
+    await bridge._send_task(call)
+    assert call.result == "not sent: this is for you, not a project — answer it yourself"
+    assert bridge.aimed_state() == before
+    assert not bridge.sessions["one"].running
+    assert not bridge.feed.after(0)
+
+
+@pytest.mark.parametrize("text", [
+    "play the very latest Yacht Club answer again", "tell me more about the build",
+])
+async def test_dispatcher_guard_allows_project_requests(bridge, text) -> None:
+    bridge.attach(Worker())
+    bridge.set_aim("one")
+    bridge.operator_said(text)
+    call = Call(text=text)
+    await bridge._send_task(call)
+    assert call.result.startswith("sent to one")
+    assert bridge.aimed_state() is None
