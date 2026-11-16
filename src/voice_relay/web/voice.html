@@ -27,11 +27,12 @@
 html, body { height: 100%; }
 body { margin: 0; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); display: flex; flex-direction: column; }
 .top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
+body.talking .top { display: none; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: var(--wa-font-weight-semibold); }
 .brand svg { color: var(--brand); }
-.gear { color: var(--wa-color-text-quiet); display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; border: 0; background: none; cursor: pointer; }
+.gear { color: var(--wa-color-text-quiet); display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; border: 0; background: none; cursor: pointer; padding: 0; flex: none; }
 .gear:hover { background: var(--wa-color-neutral-fill-quiet); color: var(--wa-color-text-normal); }
-.gear { padding: 0; }
+body.talking .talk-bar .gear { width: 32px; height: 32px; }
 main { flex: 1; min-height: 0; width: 100%; max-width: 460px; margin: 0 auto; padding: 0 16px 16px; display: flex; flex-direction: column; }
 .hidden { display: none !important; }
 a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
@@ -59,49 +60,56 @@ a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
 .info:hover, .info:focus-visible { color: var(--wa-color-text-normal); border-color: var(--wa-color-text-normal); }
 .code::part(input) { font-family: var(--wa-font-family-code); font-size: var(--wa-font-size-s); }
 
-#talk { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 18px; }
-.stage { display: grid; justify-items: center; gap: 10px; padding: 14px 0 4px; }
+#talk { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.talk-bar {
+  position: sticky; top: 0; z-index: 2; background: var(--wa-color-surface-default);
+  display: flex; align-items: center; gap: 8px; padding: 6px 0; max-height: 56px; min-height: 44px;
+}
+.talk-status { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1; }
+.talk-end { display: flex; align-items: center; gap: 6px; margin-left: auto; flex: none; }
 .mic {
-  width: 112px; height: 112px; border-radius: 50%; border: 0; cursor: pointer; display: grid; place-items: center;
+  width: 44px; height: 44px; border-radius: 50%; border: 0; cursor: pointer; display: grid; place-items: center; flex: none;
   background: var(--brand); color: #fff; box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent);
   transition: background .2s, transform .1s;
 }
 .mic:active { transform: scale(.97); }
-.mic:focus-visible { outline: 3px solid var(--wa-color-focus); outline-offset: 4px; }
-.mic svg { width: 44px; height: 44px; }
+.mic:focus-visible { outline: 3px solid var(--wa-color-focus); outline-offset: 2px; }
+.talk-bar .mic svg { display: block; width: 22px; height: 22px; min-width: 22px; min-height: 22px; flex: none; }
 .mic .slash { display: none; }
 .mic[data-state=off] { background: var(--idle); }
 .mic[data-state=muted] { background: var(--idle); }
 .mic[data-state=muted] .slash { display: inline; }
 .mic[data-state=listening] { background: var(--listening); animation: breathe 2.4s ease-in-out infinite; }
 .mic[data-state=speaking] { background: var(--brand); animation: pulse 1s ease-out infinite; }
-@keyframes breathe { 50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--listening) 18%, transparent); } }
-@keyframes pulse { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); } to { box-shadow: 0 0 0 22px transparent; } }
+@keyframes breathe { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--listening) 18%, transparent); } }
+@keyframes pulse { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); } to { box-shadow: 0 0 0 12px transparent; } }
 @media (prefers-reduced-motion: reduce) { .mic { animation: none !important; } }
-.prefs { display: flex; gap: 12px; }
-.prefs .chip { min-width: 64px; min-height: 44px; font-size: var(--wa-font-size-m); }
-.status { font-weight: var(--wa-font-weight-semibold); }
-.hint { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-s); min-height: 1.4em; text-align: center; }
+.prefs { display: flex; gap: 6px; }
+.talk-bar .prefs .chip { min-width: 0; min-height: 28px; padding: 2px 8px; font-size: var(--wa-font-size-xs); }
+.status { font-weight: var(--wa-font-weight-semibold); font-size: var(--wa-font-size-s); white-space: nowrap; }
+.hint { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sound-row { display: flex; justify-content: center; padding: 2px 0; min-height: 0; }
+.sound-row:has(.hidden) { display: none; }
+.sound-row wa-button { --wa-form-control-height: 28px; font-size: var(--wa-font-size-xs); }
 
-h2 { margin: 0 0 6px; font-size: var(--wa-font-size-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--wa-color-text-quiet); }
-.sessions { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-.sessions li { margin: 0; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--wa-border-radius-m); background: var(--wa-color-surface-lowered); font-size: var(--wa-font-size-s); }
-.sessions .name { font-weight: var(--wa-font-weight-semibold); }
-.sessions .doing { margin-left: auto; color: var(--wa-color-text-quiet); }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--idle); flex: none; }
+h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--wa-color-text-quiet); }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; margin: 0; }
+.tag {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; margin: 0;
+  border: 1px solid var(--wa-color-surface-border); border-radius: 999px; background: var(--wa-color-surface-lowered);
+  font: inherit; font-size: var(--wa-font-size-xs); line-height: 1; cursor: pointer; color: inherit;
+  transition: background .15s, transform .15s;
+}
+.tag:active, .tag.pressed { transform: scale(.96); background: var(--wa-color-neutral-fill-quiet); }
+.tag.waiting { outline: 1px solid var(--waiting); outline-offset: -1px; }
+.tag .name { line-height: 1; }
+.tag .waits { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); }
+.tag .dot { display: block; flex: none; width: 7px; height: 7px; margin-top: 0; transform: none; border-radius: 50%; background: var(--idle); }
 .dot.working { background: var(--working); }
 .dot.waiting { background: var(--waiting); }
-li.waiting { outline: 1px solid var(--waiting); }
-.empty { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-s); }
+.empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
-#sessions-fold { border: 0; padding: 0; margin: 0; background: none; box-shadow: none; }
-#sessions-fold summary { list-style: none; cursor: pointer; font-size: var(--wa-font-size-s); color: var(--wa-color-text-quiet); padding: 8px 10px; border-radius: var(--wa-border-radius-m); background: var(--wa-color-surface-lowered); min-height: 40px; display: flex; align-items: center; gap: 8px; box-sizing: border-box; border: 0; box-shadow: none; margin: 0; }
-#sessions-fold summary::-webkit-details-marker { display: none; }
-#sessions-fold summary::after { content: ""; display: block; width: 8px; height: 8px; margin-left: auto; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg); rotate: none; margin-top: -4px; transition: transform .15s; }
-#sessions-fold[open] summary::after { transform: rotate(-135deg); margin-top: 4px; }
-#sessions-fold > .sessions { margin: 4px 0 0; padding: 0; }
-
-.log-wrap { flex: 1; min-height: 45vh; display: flex; flex-direction: column; }
+.log-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
 .line { max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
@@ -147,22 +155,22 @@ li.waiting { outline: 1px solid var(--waiting); }
         <button class="gear" id="tip-close" aria-label="Close the tip" title="Close">✕</button>
       </div>
     </wa-callout>
-    <div class="stage">
+    <div class="talk-bar">
       <button class="mic" id="mic" data-state="off" aria-label="Connect">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/>
         </svg>
       </button>
-      <div class="status" id="status" role="status">Connecting</div>
-      <div class="hint" id="hint"></div>
-      <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
-      <wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button>
+      <div class="talk-status">
+        <div class="status" id="status" role="status">Connecting</div>
+        <div class="hint" id="hint"></div>
+      </div>
+      <div class="talk-end">
+        <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button></div>
+      </div>
     </div>
-    <ul class="sessions" id="active-sessions"></ul>
-    <details id="sessions-fold">
-      <summary id="sessions-summary"></summary>
-      <ul class="sessions" id="sessions"></ul>
-    </details>
+    <div class="sound-row"><wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button></div>
+    <div class="tags" id="sessions"></div>
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
@@ -188,7 +196,6 @@ const PARTS = { stt: "Speech recognition", llm: "Agent model", tts: "Voice" };
 const WHERE = [["api", "API"], ["local", "This computer"], ["server", "Your server"]];
 const DEFAULT = "__default__";  // wa-select needs a non-empty value for the provider default
 const LANGUAGE_NAMES = new Intl.DisplayNames(["en"], { type: "language" });
-const DOING = { working: "works", waiting: "waits for your OK", idle: "idle" };
 const KEPT_LINES = 80;
 const $ = id => document.getElementById(id);
 const audio = new Audio();
@@ -502,6 +509,12 @@ async function testAndStart(event) {
   } finally { $("start").loading = false; }
 }
 
+function setTalking(on) {
+  document.body.classList.toggle("talking", on);
+  const host = on ? document.querySelector(".talk-end") : document.querySelector(".top");
+  if (host && $("gear").parentElement !== host) host.appendChild($("gear"));
+}
+
 async function showSetup() {
   state = await api("/settings/state");
   picks = Object.fromEntries(Object.keys(PARTS).map(stage => [stage, { where: whereOf(stage, saved(stage)), provider: saved(stage) }]));
@@ -509,11 +522,13 @@ async function showSetup() {
   $("back").classList.toggle("hidden", !connected);
   $("talk").classList.add("hidden");
   $("setup").classList.remove("hidden");
+  setTalking(false);
 }
 
 function start() {
   $("setup").classList.add("hidden");
   $("talk").classList.remove("hidden");
+  setTalking(true);
   if (client) restart("start");
   else connect(false, "start");
 }
@@ -708,35 +723,38 @@ function say(who, text) {
   log.scrollTop = log.scrollHeight;
 }
 
-function sessionRow(session) {
-  const doing = session.waiting ? "waiting" : session.running ? "working" : "idle";
-  return el("li", { class: doing }, el("span", { class: `dot ${doing}` }), el("span", { class: "name", text: session.name }), el("span", { class: "doing", text: DOING[doing] }));
+const SESSION_RANK = { waiting: 0, working: 1, idle: 2 };
+
+function sessionDoing(session) {
+  return session.waiting ? "waiting" : session.running ? "working" : "idle";
+}
+
+const SESSION_ARIA = { working: "working", waiting: "waiting for your OK", idle: "idle" };
+
+function sessionTag(session) {
+  const doing = sessionDoing(session);
+  const btn = el("button", { type: "button", class: `tag ${doing}`, "data-session": session.name, "aria-label": `${session.name}, ${SESSION_ARIA[doing]}` },
+    el("span", { class: `dot ${doing}` }),
+    el("span", { class: "name", text: session.name }),
+    doing === "waiting" ? el("span", { class: "waits", text: "waits" }) : null);
+  btn.addEventListener("click", () => {
+    btn.classList.add("pressed");
+    setTimeout(() => btn.classList.remove("pressed"), 150);
+  });
+  return btn;
 }
 
 function renderSessions(sessions) {
-  const summary = $("sessions-summary");
+  const box = $("sessions");
   if (!sessions.length) {
-    summary.textContent = "No session linked";
-    $("active-sessions").replaceChildren();
-    $("sessions").replaceChildren(el("li", { class: "empty", text: "No session linked. Run /voice-relay in Claude Code." }));
+    box.replaceChildren(el("p", { class: "empty", text: "No session linked. Run /voice-relay in Claude Code." }));
     return;
   }
-  const active = sessions.filter(s => s.waiting || s.running);
-  $("active-sessions").replaceChildren(...active.map(sessionRow));
-  $("sessions").replaceChildren(...sessions.map(sessionRow));
-  const n = sessions.length;
-  let waiting = 0, working = 0;
-  for (const s of sessions) {
-    if (s.waiting) waiting++;
-    else if (s.running) working++;
-  }
-  const parts = [`${n} session${n === 1 ? "" : "s"}`];
-  if (waiting === 0 && working === 0) parts.push("all idle");
-  else {
-    if (waiting) parts.push(`${waiting} waiting for you`);
-    if (working) parts.push(`${working} working`);
-  }
-  summary.textContent = parts.join(" · ");
+  const sorted = [...sessions].sort((a, b) => {
+    const ra = SESSION_RANK[sessionDoing(a)], rb = SESSION_RANK[sessionDoing(b)];
+    return ra !== rb ? ra - rb : a.name.localeCompare(b.name);
+  });
+  box.replaceChildren(...sorted.map(sessionTag));
 }
 
 async function poll() {
@@ -809,7 +827,7 @@ $("setup").addEventListener("submit", testAndStart);
 $("anyway").addEventListener("click", start);
 $("tip-close").addEventListener("click", () => $("tip").classList.add("hidden"));
 $("gear").addEventListener("click", showSetup);
-$("back").addEventListener("click", event => { event.preventDefault(); $("setup").classList.add("hidden"); $("talk").classList.remove("hidden"); });
+$("back").addEventListener("click", event => { event.preventDefault(); $("setup").classList.add("hidden"); $("talk").classList.remove("hidden"); setTalking(true); });
 for (const event of ["pageshow", "focus", "online"]) addEventListener(event, wake);
 addEventListener("pagehide", () => { if (connected && !muted) void muteHere(); });
 document.addEventListener("visibilitychange", () => {
@@ -829,19 +847,13 @@ for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () =>
 });
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 
-const sessionsFold = $("sessions-fold");
-try { sessionsFold.open = localStorage.getItem("voice-sessions-open") === "1"; } catch { /* storage can be disabled */ }
-sessionsFold.addEventListener("toggle", () => {
-  try { localStorage.setItem("voice-sessions-open", sessionsFold.open ? "1" : "0"); } catch { /* storage can be disabled */ }
-});
-
 note("page-load");
 setAudioSession("playback");
 note("audio-session-api", navigator.audioSession ? "yes" : "no");
 await Promise.all(["wa-button"].map(tag => customElements.whenDefined(tag)));
 state = await api("/settings/state");
 if (state.problems.length) await showSetup();
-else { $("talk").classList.remove("hidden"); connect(); }
+else { $("talk").classList.remove("hidden"); setTalking(true); connect(); }
 poll();
 </script>
 </body>
