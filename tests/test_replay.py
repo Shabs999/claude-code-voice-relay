@@ -51,6 +51,7 @@ async def test_replay_feed(bridge: Bridge) -> None:
     bridge._quiet.clear()
     assert await bridge.replay_feed(event_id) == "busy"
     bridge._quiet.set()
+    bridge._pending_replay_until = 0.0
 
     await bridge.waiting(session, "approve run")
     waiting_id = bridge.feed.last_id()
@@ -87,8 +88,26 @@ async def test_replay_routes(bridge: Bridge, monkeypatch: pytest.MonkeyPatch) ->
         version = bridge.feed.version
         ok = await client.post("/desktop/replay", headers=headers, json={"id": event_id})
         assert ok.status_code == 204
+        again = await client.post("/desktop/replay", headers=headers, json={"id": event_id})
+        assert again.status_code == 409 and again.json() == {"error": "busy"}
         speech = [frame for frame in worker.frames if isinstance(frame, TTSSpeakFrame)]
         assert len(speech) == 1 and speech[0].text == "Spoken line"
         assert bridge.feed.version == version
         while not session.commands.empty():
             assert session.commands.get_nowait()["kind"] != TASK
+
+
+async def test_replay_pending_timeout(bridge: Bridge, monkeypatch) -> None:
+    worker = Worker()
+    bridge.attach(worker)  # type: ignore[arg-type]
+    session, _ = bridge.sessions.link("s", "shop", "/tmp")
+    await bridge.answer(session, "Hello")
+    worker.frames.clear()
+    clock = [100.0]
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: clock[0])
+    assert await bridge.replay_feed(bridge.feed.last_id()) is None
+    clock[0] = 129.9
+    assert await bridge.replay_feed(bridge.feed.last_id()) == "busy"
+    clock[0] = 130.0
+    assert await bridge.replay_feed(bridge.feed.last_id()) is None
+    assert len([f for f in worker.frames if isinstance(f, TTSSpeakFrame)]) == 2

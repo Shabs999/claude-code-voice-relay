@@ -24,7 +24,8 @@
   --wa-form-control-activated-color: #8b87ff; --wa-color-focus: #8b87ff;
 }
 * { box-sizing: border-box; }
-html { height: 100%; overflow: hidden; }
+html, body { height: 100%; }
+html { overflow: hidden; }
 body { height: 100vh; height: 100dvh; overflow: hidden; width: 100%; }
 body { margin: 0; background: var(--wa-color-surface-default); color: var(--wa-color-text-normal); display: flex; flex-direction: column; }
 .top { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
@@ -35,7 +36,7 @@ body.talking .top { display: none; }
 .gear:hover { background: var(--wa-color-neutral-fill-quiet); color: var(--wa-color-text-normal); }
 body.talking .talk-bar .gear { width: 32px; height: 32px; }
 main { flex: 1; min-height: 0; width: 100%; max-width: 460px; margin: 0 auto; padding: 0 16px 16px; display: flex; flex-direction: column; }
-.hidden { display: none !important; }
+.hidden, [hidden] { display: none !important; }
 a { color: var(--wa-color-brand-on-quiet, var(--brand)); }
 
 #setup { display: grid; gap: 14px; padding-top: 4px; }
@@ -116,7 +117,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 @media (prefers-reduced-motion: reduce) { .tag .dot.working { animation: none; } }
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
-.log-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.log-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
@@ -778,7 +779,7 @@ async function openConnection(replace, reason) {
         ensureAudioPlaying("speech-arrived");
         show();
       },
-      onBotStoppedSpeaking() { speaking = false; lastAgent = null; replayingId = null; show(); renderFeed(); },
+      onBotStoppedSpeaking() { speaking = false; replayingId = null; show(); renderFeed(); },
       onDisconnected() {
         if (client !== attempt) return;
         note("disconnected", reason);
@@ -829,7 +830,6 @@ function show(phase) {
 
 new ResizeObserver(() => {
   const log = $("log"), bottom = nearBottom();
-  log.style.paddingBottom = `${$("compose-footer").offsetHeight}px`;
   if (bottom) log.scrollTop = log.scrollHeight;
 }).observe($("compose-footer"));
 
@@ -843,25 +843,33 @@ function matchesEvent(text, event) {
   return event.kind !== "you" && text.toLowerCase().startsWith(prefix.toLowerCase()) &&
     normalise(text.slice(prefix.length)).slice(0, 40) === normalise(event.spoken).slice(0, 40);
 }
+let conversationArrival = 0;
 function say(who, text) {
   if (who === "agent" && [...feedEvents.values()].some(event => matchesEvent(text, event))) return;
   const log = $("log"), bottom = nearBottom();
+  const now = Date.now() / 1000;
   const last = log.lastElementChild;
-  const joined = who === "agent" && lastAgent?.parentNode === log ? lastAgent :
+  const joined = who === "agent" && lastAgent?.parentNode === log && now - Number(lastAgent.dataset.segmentAt) <= 2 ? lastAgent :
     who === "you" && last?.dataset.door === "voice" ? last : null;
   if (joined) {
     joined.textContent += ` ${text.trim()}`;
     joined.dataset.spoken = joined.textContent;
+    joined.dataset.segmentAt = now;
+    joined.hidden = who === "agent" && /^[^\n:]+:$/.test(joined.textContent.trim());
     renderFeed();
     if (bottom) log.scrollTop = log.scrollHeight;
     return;
   }
   const line = el("div", { class: `line ${who}`, text: text.trim() });
-  line.dataset.wall = Date.now() / 1000;
+  line.dataset.wall = now;
+  line.dataset.segmentAt = now;
+  line.dataset.arrival = ++conversationArrival;
+  line.hidden = who === "agent" && /^[^\n:]+:$/.test(text.trim());
   line.dataset.spoken = text.trim();
   line.dataset.door = who === "you" ? "voice" : "dispatcher";
   log.append(line);
   lastAgent = who === "agent" ? line : null;
+  renderFeed();
   if (bottom) log.scrollTop = log.scrollHeight;
 }
 
@@ -1013,8 +1021,7 @@ function feedCard(event) {
 
 function renderFeed() {
   const box = $("log"), bottom = nearBottom();
-  for (const event of [...feedEvents.values()].sort((a, b) => a.id - b.id)) {
-    if (event.kind === "you" && event.door === "voice") continue;
+  for (const event of feedEvents.values()) {
     const existing = box.querySelector(`[data-id="${event.id}"]`);
     const duplicate = [...box.children].find(node => event.kind === "you"
       ? node.dataset.door === event.door && normalise(node.dataset.spoken || "") === normalise(event.text)
@@ -1023,13 +1030,14 @@ function renderFeed() {
     card.dataset.id = event.id;
     card.dataset.wall = event.wall;
     if (event.kind === "you") { card.dataset.door = event.door; card.dataset.spoken = event.text; }
+    card.dataset.arrival = (existing || duplicate)?.dataset.arrival || ++conversationArrival;
     if (existing) existing.replaceWith(card);
     else if (duplicate) duplicate.replaceWith(card);
-    else {
-      const later = [...box.children].find(node => Number(node.dataset.wall) > event.wall);
-      box.insertBefore(card, later || null);
-    }
+    else box.append(card);
   }
+  const ordered = [...box.children].sort((a, b) =>
+    Number(a.dataset.wall) - Number(b.dataset.wall) || Number(a.dataset.arrival) - Number(b.dataset.arrival));
+  box.append(...ordered);
   if (bottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -1193,12 +1201,6 @@ async function sendCompose() {
   finally { sendingCompose = false; }
 }
 $("compose").addEventListener("submit", event => { event.preventDefault(); void sendCompose(); });
-function fitViewport() {
-  if (window.visualViewport) document.body.style.height = `${window.visualViewport.height}px`;
-}
-window.visualViewport?.addEventListener("resize", fitViewport);
-window.visualViewport?.addEventListener("scroll", fitViewport);
-fitViewport();
 
 $("reply-clear").addEventListener("click", () => void clearReply());
 $("mic").addEventListener("click", async () => {

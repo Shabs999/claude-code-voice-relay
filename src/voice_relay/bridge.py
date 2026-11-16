@@ -201,6 +201,7 @@ class Bridge:
         self._missed: deque[tuple[float, str, str, str, float]] = deque(maxlen=500)
         self._last_dropped: tuple[str, float] | None = None
         self._drops: dict[str, asyncio.Task[None]] = {}
+        self._pending_replay_until = 0.0
         self._replayed_at: float | None = None
         self._replayed_worker: PipelineWorker | None = None
         self.tts_provider = ""
@@ -431,6 +432,7 @@ class Bridge:
         async def _on_turn_ended(observer: Any, turn: int, seconds: float, cut: bool) -> None:
             if self._worker is worker:
                 self._quiet.set()
+                self._pending_replay_until = 0.0
 
     def detach(self, worker: PipelineWorker) -> None:
         if self._replayed_worker is worker:
@@ -773,11 +775,17 @@ class Bridge:
             return "missing"
         if not self.voice():
             return "not connected"
-        if self.voice_busy():
+        if self.voice_busy() or time.monotonic() < self._pending_replay_until:
             return "busy"
         text = replay_text(event, multi=len(self.sessions.all()) > 1)
-        if not await self.say(text):
-            return "not connected"
+        self._pending_replay_until = time.monotonic() + 30
+        try:
+            if not await self.say(text):
+                self._pending_replay_until = 0.0
+                return "not connected"
+        except BaseException:
+            self._pending_replay_until = 0.0
+            raise
         return None
 
     async def send_feed_option(self, event_id: int, number: str) -> str | None:
