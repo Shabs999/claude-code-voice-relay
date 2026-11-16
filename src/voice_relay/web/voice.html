@@ -118,11 +118,11 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
 .log-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
+.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; padding-bottom: var(--compose-h, 0px); }
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
-.compose { padding-bottom: max(12px, env(safe-area-inset-bottom)); display: flex; gap: 8px; align-items: center; padding-top: 8px; flex: none; }
+.compose { display: flex; gap: 8px; align-items: center; padding-top: 8px; flex: none; }
 .compose .typed {
   flex: 1; min-width: 0; min-height: 44px; margin: 0; padding: 10px 12px; font: inherit; font-size: 16px;
   border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
@@ -159,7 +159,13 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .feed-body { overflow-wrap: anywhere; min-width: 0; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .feed-body { white-space: pre-wrap; }
 .feed-body ol { white-space: normal; padding-left: 24px; }
-.compose-footer { flex: none; background: var(--wa-color-surface-default); }
+.compose-footer {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; flex: none;
+  padding: 0 16px max(12px, env(safe-area-inset-bottom));
+  background: var(--wa-color-surface-default); border-top: 1px solid var(--wa-color-surface-border);
+}
+.compose-footer.compose-top { position: sticky; top: 0; bottom: auto; }
+#talk:has(.compose-top) .log { padding-bottom: 0; }
 body.talking main { padding-bottom: 0; }
 #talk > :not(.log-wrap), .feed-card, .line { flex-shrink: 0; }
 .feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
@@ -828,10 +834,37 @@ function show(phase) {
   if (now !== "off") $("hint").textContent = hint;
 }
 
-new ResizeObserver(() => {
+const composePositions = new Set();
+let composeFrame = 0;
+function measureCompose() {
+  composeFrame = 0;
+  const compose = $("compose-footer");
+  if (!compose.getClientRects().length) return;
   const log = $("log"), bottom = nearBottom();
+  const rect = compose.getBoundingClientRect(), vv = window.visualViewport;
+  const visible = vv ? vv.height + vv.offsetTop : innerHeight;
+  document.documentElement.style.setProperty("--compose-h", `${rect.height}px`);
+  const reason = `bottom=${rect.bottom} visible=${visible} inner=${innerHeight} vv=${vv?.height ?? innerHeight} top=${vv?.offsetTop ?? 0}`;
+  if (!composePositions.has(reason)) {
+    composePositions.add(reason);
+    note("compose-pos", reason);
+  }
+  if (rect.bottom > visible + 4 && !compose.classList.contains("compose-top")) {
+    compose.classList.add("compose-top");
+    $("talk").insertBefore(compose, document.querySelector(".log-wrap"));
+    scheduleCompose();
+  }
   if (bottom) log.scrollTop = log.scrollHeight;
-}).observe($("compose-footer"));
+}
+function scheduleCompose() {
+  if (!composeFrame) composeFrame = requestAnimationFrame(measureCompose);
+}
+new ResizeObserver(scheduleCompose).observe($("compose-footer"));
+new MutationObserver(scheduleCompose).observe($("log"), { childList: true });
+window.addEventListener("load", scheduleCompose);
+window.addEventListener("resize", scheduleCompose);
+window.visualViewport?.addEventListener("resize", scheduleCompose);
+scheduleCompose();
 
 function nearBottom() {
   const log = $("log");
