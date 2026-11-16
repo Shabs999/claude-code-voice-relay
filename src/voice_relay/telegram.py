@@ -324,6 +324,7 @@ def format_inbound(
     reply_text: str | None = None,
     reply_wall: float | None = None,
     reply_header: bool = False,
+    reply_part: bool = False,
     channel: str = "Telegram",
     attachments: tuple[str, ...] = (),
 ) -> str:
@@ -332,11 +333,17 @@ def format_inbound(
         body = f"Shahab, by {channel} ({when}):\n{text}"
     else:
         reply_when = clock(reply_wall or wall)
-        prefix = (
-            f"Shahab, by {channel} ({when}), replying to your message of {reply_when}:\n"
-            if reply_header
-            else f"Shahab, by {channel} ({when}):\n"
-        )
+        if reply_header and reply_part:
+            prefix = (
+                f"Shahab, by {channel} ({when}), "
+                f"replying to part of your message of {reply_when}:\n"
+            )
+        elif reply_header:
+            prefix = (
+                f"Shahab, by {channel} ({when}), replying to your message of {reply_when}:\n"
+            )
+        else:
+            prefix = f"Shahab, by {channel} ({when}):\n"
         quoted = "\n".join(f"> {line}" for line in _excerpt(reply_text).splitlines())
         body = f"{prefix}{quoted}\n\n{text}"
     if attachments:
@@ -1066,15 +1073,18 @@ class Door:
                 mapped_excerpt = mapped.get("excerpt")
         if mapped_excerpt and (not reply_text or reply.get("voice")):
             reply_text = mapped_excerpt
-        if reply.get("message_id") and reply_text:
+        quote = (message.get("quote") or {}).get("text")
+        quote_text = quote.strip() if isinstance(quote, str) else ""
+        if reply.get("message_id") and (quote_text or reply_text):
             if reply_wall is None:
                 reply_wall = float(reply.get("date", wall))
             return format_inbound(
                 text,
                 wall=wall,
-                reply_text=reply_text,
+                reply_text=quote_text or reply_text,
                 reply_wall=reply_wall,
                 reply_header=True,
+                reply_part=bool(quote_text),
                 channel=channel,
                 attachments=attachments,
             )

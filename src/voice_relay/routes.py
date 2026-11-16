@@ -45,7 +45,7 @@ class AttachmentParser(MultiPartParser):
 async def attachment_form(request: Request):
     try:
         form = await AttachmentParser(request.headers, request.stream(), max_files=5,
-                                      max_fields=3).parse()
+                                      max_fields=5).parse()
     except MultiPartException as error:
         limited = error.message == "attachment too large" or "Too many files" in error.message
         raise HTTPException(413 if limited else 400, error.message) from None
@@ -331,13 +331,22 @@ def mount(
     @app.post("/desktop/say")
     async def say(request: Request) -> Response:
         authorize(request)
-        text = _text(await _body(request), "text").strip()
+        payload = await _body(request)
+        text = _text(payload, "text").strip()
         if not text:
             raise HTTPException(400, "text: expected non-empty text")
         if len(text) > 2000:
             raise HTTPException(400, "text: expected at most 2000 characters")
+        if "quote" in payload:
+            quote = payload.get("quote")
+            if quote is not None and not isinstance(quote, str):
+                raise HTTPException(400, "quote: expected a string or null")
         if not bridge.voice():
             return JSONResponse({"error": "voice not connected"}, status_code=409)
+        if "quote" in payload:
+            bridge._aimed_quote = (
+                (quote.strip()[:500] or None) if isinstance(quote, str) else None
+            )
         await bridge.operator_text(text)
         return Response(status_code=204)
 
@@ -357,6 +366,13 @@ def mount(
             text = str(form.get("text") or "")
             if len(text) > 2000:
                 raise HTTPException(400, "text too long")
+            raw_quote = form.get("quote")
+            quote = None
+            if raw_quote is not None:
+                quote = str(raw_quote).strip()
+                if len(quote) > 500:
+                    raise HTTPException(400, "quote too long")
+                quote = quote or None
             live = bridge.sessions.live()
             name = str(form.get("session") or "")
             reply = None
@@ -391,8 +407,9 @@ def mount(
             context = reply if reply is not None and reply.session == session.name else None
             body = format_inbound(
                 text or "(no caption)", wall=time.time(), channel="voice page",
-                reply_text=context.text if context else None,
+                reply_text=(quote or context.text) if context else None,
                 reply_wall=context.wall if context else None, reply_header=True,
+                reply_part=bool(quote and context),
                 attachments=paths,
             )
             if not await bridge.send_task_direct(
@@ -431,8 +448,18 @@ def mount(
             raise HTTPException(
                 400, f"reply_to: expected an integer, got {type(reply_to).__name__}",
             )
+        quote_val: str | None = None
+        if "quote" in body:
+            raw = body.get("quote")
+            if raw is not None and not isinstance(raw, str):
+                raise HTTPException(400, "quote: expected a string or null")
+            quote_val = (raw.strip()[:500] or None) if isinstance(raw, str) else None
         try:
-            bridge.set_aim(session, reply_to=reply_to)
+            bridge.set_aim(
+                session,
+                reply_to=reply_to,
+                quote=quote_val if "quote" in body or reply_to is not None else None,
+            )
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
         return Response(status_code=204)

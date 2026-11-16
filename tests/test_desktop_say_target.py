@@ -59,6 +59,21 @@ async def test_say_routes(bridge, monkeypatch) -> None:
         assert frame.messages == [{"role": "user", "content": "run lint"}]
 
 
+async def test_say_disconnected_preserves_quote(bridge) -> None:
+    bridge.set_aim("one", quote="original")
+    app = FastAPI()
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token="test-token",
+                 port=7860, poll=0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://localhost:7860") as client:
+        response = await client.post(
+            "/desktop/say", headers={"authorization": "Bearer test-token"},
+            json={"text": "hi", "quote": "replacement"},
+        )
+    assert response.status_code == 409
+    assert bridge._aimed_quote == "original"
+
+
 async def test_target_routes(bridge, monkeypatch) -> None:
     monkeypatch.setattr(settings, "environment", lambda: {})
     monkeypatch.setattr(settings, "problems", lambda: [])

@@ -315,6 +315,39 @@ async def test_bridge_answer_sample_reply_format(
         "fix the bug"
     )
 
+
+async def test_telegram_partial_quote_in_reply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    door, bridge, _ = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    t0 = 1_731_700_000.0
+    monkeypatch.setattr(
+        telegram,
+        "clock",
+        lambda wall, suffix=True: "8:41 pm" if wall < t0 - 100 else "8:52 pm",
+    )
+    full = "First sentence. Second sentence with detail."
+    body = door._build_body(
+        "only the second",
+        {
+            "date": t0,
+            "quote": {"text": "Second sentence with detail."},
+            "reply_to_message": {"message_id": 50, "text": full, "date": t0 - 660},
+        },
+    )
+    assert "replying to part of your message of 8:41 pm" in body
+    assert "> Second sentence with detail." in body
+    assert "First sentence" not in body
+    whole = door._build_body(
+        "whole reply",
+        {"date": t0, "reply_to_message": {"message_id": 51, "text": full, "date": t0 - 660}},
+    )
+    assert "replying to your message of" in whole
+    assert "part of" not in whole
+    assert "> First sentence. Second sentence with detail." in whole
+
+
 async def test_ack_failure_retry_queues_once(monkeypatch, tmp_path) -> None:
     door, bridge, api = _door(monkeypatch, tmp_path)
     await _link(bridge)

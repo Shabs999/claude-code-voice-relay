@@ -98,6 +98,19 @@ async def test_typed_reply_to(bridge) -> None:
     assert "by typing" in message
 
 
+async def test_partial_quote_reply_to(bridge) -> None:
+    session, _ = bridge.sessions.link("s", "shop", "/tmp")
+    await bridge.answer(session, "Long answer with a specific phrase inside.")
+    event_id = bridge.feed.last_id()
+    bridge.set_aim("shop", reply_to=event_id, quote="specific phrase")
+    from voice_relay.record import Line
+
+    message = bridge._task_body([Line(1.0, "Shahab", "about that bit", True)])
+    assert "replying to part of your message" in message
+    assert "> specific phrase" in message
+    assert "Long answer" not in message
+
+
 async def test_spoken_name_beats_reply_to(bridge) -> None:
     bridge.sessions.link("two", "Privacy", "/tmp")
     session, _ = bridge.sessions.link("s", "shop", "/tmp")

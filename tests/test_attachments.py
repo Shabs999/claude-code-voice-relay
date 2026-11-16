@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -56,6 +56,40 @@ async def test_attach_routing_saving_reply(upload_client):
         rows = bridge.feed.after(1)
         assert len(rows) == 2 and all(row["door"] == "page attachment" for row in rows)
         assert rows[0]["text"] == "look" and rows[0]["attachments"]
+
+
+async def test_attach_partial_quote_reply(upload_client):
+    bridge, client = upload_client
+    files = {"files": ("shot.png", b"png", "image/png")}
+    headers = {"authorization": "Bearer test"}
+    sent = []
+    bridge.sessions["alpha"].send = lambda kind, body: sent.append(body)
+    bridge.feed.record_answer(bridge.sessions["alpha"], "Alpha whole message body")
+    async with client:
+        response = await client.post(
+            "/desktop/attach",
+            headers=headers,
+            files=files,
+            data={"session": "Alpha", "text": "only part", "reply_to": "1", "quote": "whole message"},
+        )
+    assert response.status_code == 200
+    assert "replying to part of your message" in sent[0]
+    assert "> whole message" in sent[0]
+    assert "Alpha whole" not in sent[0]
+
+
+async def test_attach_rejects_long_quote_before_saving(upload_client, monkeypatch):
+    _, client = upload_client
+    save = Mock()
+    monkeypatch.setattr(routes, "save_inbox_file", save)
+    async with client:
+        response = await client.post(
+            "/desktop/attach", headers={"authorization": "Bearer test"},
+            files={"files": ("shot.png", b"png", "image/png")},
+            data={"session": "Alpha", "quote": "x" * 501},
+        )
+    assert response.status_code == 400
+    save.assert_not_called()
 
 
 @pytest.mark.parametrize("files,status", [

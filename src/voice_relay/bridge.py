@@ -220,6 +220,7 @@ class Bridge:
         self.feed = Feed()
         self._answering: set[int] = set()
         self._aimed_reply_to: int | None = None
+        self._aimed_quote: str | None = None
 
     def held(self) -> bool:
         if self._hold_until is None:
@@ -329,6 +330,7 @@ class Bridge:
             return None
         if time.monotonic() - self._aimed_at > AIM_SECONDS:
             self._aimed_reply_to = None
+            self._aimed_quote = None
             return None
         return self._aimed.name
 
@@ -336,12 +338,22 @@ class Bridge:
         name = self.aimed()
         if name is None:
             return None
-        return {"session": name, "reply_to": self._aimed_reply_to}
+        state: dict[str, Any] = {"session": name, "reply_to": self._aimed_reply_to}
+        if self._aimed_quote:
+            state["quote"] = self._aimed_quote
+        return state
 
-    def set_aim(self, name: str | None, *, reply_to: int | None = None) -> None:
+    def set_aim(
+        self,
+        name: str | None,
+        *,
+        reply_to: int | None = None,
+        quote: str | None = None,
+    ) -> None:
         if name is None:
             self._aimed = None
             self._aimed_reply_to = None
+            self._aimed_quote = None
             return
         found = self.sessions.find(name)
         if not isinstance(found, Session) or found not in self.sessions.live():
@@ -351,10 +363,12 @@ class Bridge:
         self._aimed = found
         self._aimed_at = time.monotonic()
         self._aimed_reply_to = reply_to
+        self._aimed_quote = quote
 
     def _clear_aim(self) -> None:
         self._aimed = None
         self._aimed_reply_to = None
+        self._aimed_quote = None
 
     async def operator_text(self, text: str) -> bool:
         worker = self._worker
@@ -527,6 +541,7 @@ class Bridge:
         if self._aimed is session:
             self._aimed = None
             self._aimed_reply_to = None
+            self._aimed_quote = None
         self._updates = [item for item in self._updates if item.session is not session]
         self._update_seen = [
             (item, outcome) for item, outcome in self._update_seen
@@ -750,12 +765,14 @@ class Bridge:
                 words = "\n".join(
                     (("(typed) " if line.typed else "") + line.text) for line in shahab
                 )
+                quote = self._aimed_quote
                 return format_inbound(
                     words,
                     wall=time.time(),
-                    reply_text=event.text,
+                    reply_text=quote or event.text,
                     reply_wall=event.wall,
                     reply_header=True,
+                    reply_part=bool(quote),
                     channel=channel,
                 )
         return task_message(lines)

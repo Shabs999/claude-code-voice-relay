@@ -154,6 +154,21 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .compose .send:active { transform: scale(.97); }
 .compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--wa-color-text-quiet); }
 .compose-note.bad { color: var(--bad); }
+.compose-quote {
+  display: flex; align-items: center; gap: 6px; min-width: 0; margin: 4px 0 0; padding: 0 2px;
+  font-size: var(--wa-font-size-xs); color: var(--wa-color-text-quiet);
+}
+.compose-quote-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compose-quote-clear {
+  flex: none; width: 28px; height: 28px; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer;
+}
+.partial-reply {
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 4; bottom: calc(var(--compose-h, 72px) + 6px);
+  border: 1px solid var(--wa-color-surface-border); border-radius: 999px; padding: 8px 14px;
+  background: var(--wa-color-surface-default); color: var(--brand); font: inherit; font-size: var(--wa-font-size-s);
+  font-weight: var(--wa-font-weight-semibold); box-shadow: 0 2px 10px rgba(0, 0, 0, .12); cursor: pointer;
+}
 
 .feed-card { text-align: left; cursor: pointer; color: inherit; }
 .feed-card.you { cursor: default; }
@@ -262,8 +277,13 @@ body.talking main { padding-bottom: 0; }
       <div class="log" id="log" aria-live="polite"></div>
       <button type="button" id="new-messages" class="new-messages hidden">New ↓</button>
     </div>
+    <button type="button" id="partial-reply" class="partial-reply hidden">Reply to this part</button>
     <div class="compose-footer" id="compose-footer">
       <div class="file-chips" id="file-chips"></div>
+      <div class="compose-quote hidden" id="compose-quote">
+        <span class="compose-quote-text" id="compose-quote-text"></span>
+        <button type="button" class="compose-quote-clear" id="compose-quote-clear" aria-label="Clear quote">✕</button>
+      </div>
       <input id="files" type="file" multiple accept="image/*,application/pdf,text/*,video/*" hidden>
       <form class="compose" id="compose">
         <button class="attach" type="button" id="attach" aria-label="Attach files">📎</button>
@@ -302,7 +322,8 @@ const PAGE_ID = Math.random().toString(36).slice(2, 8);
 let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot, aimed;
 let selectedFiles = [], pickingProject = false, feedBusy = false;
 let feedVersion = 0;
-let feedLast = 0, feedEvents = new Map(), feedExpanded = new Set(), replyTo = null;
+let feedLast = 0, feedEvents = new Map(), feedExpanded = new Set(), replyTo = null, quoteText = null;
+let partialReplyPick = null;
 let replayingId = null, feedReplayBusy = new Set();
 const FEED_REPLAY_KINDS = new Set(["answer", "waiting", "update"]);
 const speeds = [1, 1.25, 1.5, 1.75, 2];
@@ -1069,6 +1090,8 @@ function feedCard(event) {
     if (event.answered) card.append(el("p", { class: "feed-answered", text: `answered ${event.answered} · ${event.option_labels?.[event.options.indexOf(event.answered)] || ""}` }));
   }
   card.addEventListener("click", async () => {
+    const sel = document.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().trim()) return;
     try {
       await desktopApi("/desktop/target", { session: event.session, reply_to: event.id });
       await poll();
@@ -1174,7 +1197,9 @@ async function poll() {
     aimed = aim?.session ?? null;
     const previousReply = replyTo;
     replyTo = aim?.reply_to ?? null;
+    quoteText = aim?.quote ?? null;
     if (replyTo !== previousReply) renderFeed();
+    renderComposeQuote();
     $("typed").placeholder = aimed
       ? (replyTo != null ? `Reply to ${aimed}…` : `Message ${aimed}…`)
       : "Message the Dispatcher…";
@@ -1212,6 +1237,13 @@ async function poll() {
     pollFailCount++;
   }
   setTimeout(poll, 2000);
+}
+
+function renderComposeQuote() {
+  const row = $("compose-quote"), label = $("compose-quote-text");
+  if (!quoteText) { row.classList.add("hidden"); label.textContent = ""; return; }
+  row.classList.remove("hidden");
+  label.textContent = quoteText;
 }
 
 let composeNoteTimer;
@@ -1264,8 +1296,13 @@ async function sendCompose() {
       body.append("text", text);
       if (aimed) body.append("session", aimed);
       if (replyTo != null) body.append("reply_to", replyTo);
+      if (quoteText) body.append("quote", quoteText);
     } else {
-      headers["content-type"] = "application/json"; body = JSON.stringify({ text });
+      const payload = { text };
+      if (replyTo != null) payload.reply_to = replyTo;
+      if (quoteText) payload.quote = quoteText;
+      headers["content-type"] = "application/json";
+      body = JSON.stringify(payload);
     }
     const reply = await fetch(attaching ? "/desktop/attach" : "/desktop/say", { method: "POST", headers, body });
     if (reply.status === 409) {
@@ -1289,6 +1326,55 @@ async function sendCompose() {
   }
 }
 $("compose").addEventListener("submit", event => { event.preventDefault(); void sendCompose(); });
+
+function feedSelectionPick() {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
+  const anchor = sel.anchorNode, focus = sel.focusNode;
+  if (!anchor || !focus) return null;
+  const bodyEl = (anchor.nodeType === Node.TEXT_NODE ? anchor.parentElement : anchor)
+    ?.closest?.(".feed-body");
+  if (!bodyEl) return null;
+  if (!bodyEl.contains(focus)) return null;
+  const card = bodyEl.closest(".feed-card[data-id]");
+  if (!card) return null;
+  const event = feedEvents.get(Number(card.dataset.id));
+  if (!event?.session) return null;
+  const text = sel.toString().trim().slice(0, 500);
+  return text ? { event, text } : null;
+}
+
+function refreshPartialReplyButton() {
+  partialReplyPick = feedSelectionPick();
+  $("partial-reply").classList.toggle("hidden", !partialReplyPick);
+}
+
+document.addEventListener("selectionchange", () => refreshPartialReplyButton());
+
+$("partial-reply").addEventListener("click", async () => {
+  const pick = partialReplyPick;
+  if (!pick) return;
+  try {
+    await desktopApi("/desktop/target", {
+      session: pick.event.session, reply_to: pick.event.id, quote: pick.text,
+    });
+    document.getSelection()?.collapseToEnd();
+    refreshPartialReplyButton();
+    $("typed").focus();
+    await poll();
+  } catch { /* poll */ }
+});
+
+$("compose-quote-clear").addEventListener("click", async () => {
+  if (replyTo == null && !aimed) return;
+  try {
+    const payload = { session: aimed, reply_to: replyTo, quote: null };
+    await desktopApi("/desktop/target", payload);
+    quoteText = null;
+    renderComposeQuote();
+    await poll();
+  } catch { /* poll */ }
+});
 
 $("mic").addEventListener("click", async () => {
   if (!connected) { $("hint").textContent = ""; await connect(false, "tap"); return; }
