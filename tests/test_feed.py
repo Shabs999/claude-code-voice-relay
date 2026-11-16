@@ -154,7 +154,7 @@ def test_page_event_matching_and_markdown(tmp_path) -> None:
     page = Path("src/voice_relay/web/voice.html").read_text()
     matching = page.split("function normalise(text)", 1)[1].split("function say(", 1)[0]
     markdown = page.split("function escapeText(text)", 1)[1].split(
-        "function updateReplyChip", 1,
+        "function feedCard", 1,
     )[0]
     script = tmp_path / "render.mjs"
     script.write_text("import assert from 'node:assert/strict';\n"
