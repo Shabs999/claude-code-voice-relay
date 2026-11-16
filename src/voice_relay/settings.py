@@ -332,8 +332,24 @@ def _body(env: Mapping[str, str]) -> str:
 
 def wanted_folders() -> set[str]:
     """Folders kept across restarts; a damaged file starts empty."""
+    return _load_folder_list(CONFIG_DIR / "linked.json")
+
+
+def forgotten_folders() -> set[str]:
+    """Folders the operator took off the link until they type /voice-relay there again."""
+    return _load_folder_list(CONFIG_DIR / "forgotten.json")
+
+
+def folder_wanted(folder: str) -> bool:
+    if not folder:
+        return False
+    resolved = str(Path(folder).resolve())
+    return resolved in wanted_folders() and resolved not in forgotten_folders()
+
+
+def _load_folder_list(path: Path) -> set[str]:
     try:
-        folders = json.loads((CONFIG_DIR / "linked.json").read_text(encoding=ENCODING))
+        folders = json.loads(path.read_text(encoding=ENCODING))
         if isinstance(folders, list) and all(isinstance(f, str) for f in folders):
             return set(folders)
     except (OSError, ValueError):
@@ -341,19 +357,27 @@ def wanted_folders() -> set[str]:
     return set()
 
 
+def _write_folder_list(path: Path, folders: set[str]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = CONFIG_DIR / f"{path.stem}-{secrets.token_hex(8)}.tmp"
+    try:
+        temporary.write_text(json.dumps(sorted(folders)) + "\n", encoding=ENCODING)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def remember_folder(folder: str, *, forget: bool = False) -> None:
     if not folder:
         return
-    folders = wanted_folders()
     resolved = str(Path(folder).resolve())
+    linked = wanted_folders()
+    forgotten = forgotten_folders()
     if forget:
-        folders.discard(resolved)
+        linked.discard(resolved)
+        forgotten.add(resolved)
     else:
-        folders.add(resolved)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    temporary = CONFIG_DIR / f"linked-{secrets.token_hex(8)}.tmp"
-    try:
-        temporary.write_text(json.dumps(sorted(folders)) + "\n", encoding=ENCODING)
-        temporary.replace(CONFIG_DIR / "linked.json")
-    finally:
-        temporary.unlink(missing_ok=True)
+        linked.add(resolved)
+        forgotten.discard(resolved)
+    _write_folder_list(CONFIG_DIR / "linked.json", linked)
+    _write_folder_list(CONFIG_DIR / "forgotten.json", forgotten)

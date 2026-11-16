@@ -5,6 +5,8 @@ type Reply = { status: number; text: string }
 function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const registered: any[] = []
   const updates: any[] = []
+  const unlinkReply = { status: 204, text: '' }
+  const statuses: any[] = []
   const updateReply = { status: 200, text: '{"outcome":"spoken"}' }
   const started: { argv: readonly string[]; env?: Record<string, string> }[] = []
   const submitted: { text: string; asUser?: boolean }[] = []
@@ -17,7 +19,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
   const ackBodies: any[] = []
   const contexts: any[] = []
   const core = { original: false, omitContext: false }
-  const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0, folders: [] as string[] }
+  const state = { up: false, id: 'session-1', wanted: false, wantedChecks: 0, folders: [] as string[], forgotten: [] as string[] }
   const context = { status: 204, text: '' }
 
   on('session.start', () => ({ cwd: '/work/shop' }))
@@ -28,10 +30,12 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     return { value: { tool: `mcp__voice-relay__${e.name}` } }
   })
   on('ui.log', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', ($: any, e: any) => { statuses.push(e); return { value: undefined } })
   on('env.get', ($: any, e: any) => ({ value: env[e.name] ?? '/home/op' }))
   on('fs.read', ($: any, e: any) => ({
-    value: e.path.endsWith('/linked.json') ? JSON.stringify(state.folders) : 'token-1\n',
+    value: e.path.endsWith('/linked.json') ? JSON.stringify(state.folders)
+      : e.path.endsWith('/forgotten.json') ? JSON.stringify(state.forgotten)
+      : 'token-1\n',
   }))
   on('session.id', () => ({ value: state.id }))
   on('session.cwd', () => ({ value: '/work/shop' }))
@@ -59,13 +63,23 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     }
     if (path === '/claude/link') {
       const body = JSON.parse(e.init.body)
-      state.wanted = true
-      linked.push(`${body.name} ${body.cwd}`)
+      if (body.automatic && (state.forgotten.includes(body.cwd) || !state.folders.includes(body.cwd))) {
+        return reply(403, '')
+      }
+      if (!body.automatic) {
+        if (!state.folders.includes(body.cwd)) state.folders.push(body.cwd)
+        state.forgotten = state.forgotten.filter(folder => folder !== body.cwd)
+        state.wanted = true
+      }
+      linked.push(`${body.automatic ? 'auto' : 'manual'} ${body.name} ${body.cwd}`)
       return reply(200, JSON.stringify({ name: 'shop' }))
     }
     if (path === '/claude/wanted') {
       state.wantedChecks += 1
-      return reply(200, JSON.stringify({ wanted: state.wanted }))
+      const cwd = new URL(e.url).searchParams.get('cwd') ?? ''
+      return reply(200, JSON.stringify({
+        wanted: state.folders.includes(cwd) && !state.forgotten.includes(cwd),
+      }))
     }
     if (path === '/claude/context' && e.init?.method !== 'POST') return reply(context.status, context.text)
     if (path === '/claude/context/ack') {
@@ -74,7 +88,16 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
       deliveries.push('ack')
     }
     if (path === '/claude/typed') typed.push(JSON.parse(e.init.body).text)
-    if (path === '/claude/unlink' && JSON.parse(e.init.body).forget) state.wanted = false
+    if (path === '/claude/unlink') {
+      if (unlinkReply.status !== 204) return reply(unlinkReply.status, unlinkReply.text)
+      const body = JSON.parse(e.init.body)
+      if (body.forget) {
+        const cwd = body.cwd ?? '/work/shop'
+        state.folders = state.folders.filter(folder => folder !== cwd)
+        if (!state.forgotten.includes(cwd)) state.forgotten.push(cwd)
+        state.wanted = state.folders.length > 0
+      }
+    }
     if (path === '/desktop/open') {
       opened.push(JSON.parse(e.init.body).page)
       return reply(204)
@@ -82,7 +105,7 @@ function setup(on: any, replies: Reply[], env: Record<string, string> = {}) {
     const next = path === '/claude/next' ? (replies.shift() ?? { status: 503, text: '' }) : { status: 204, text: '' }
     return reply(next.status, next.text)
   })
-  return { registered, updates, updateReply, started, submitted, opened, linked, calls, state, context, typed, acks, ackBodies, contexts, core, replies, deliveries }
+  return { unlinkReply, statuses, registered, updates, updateReply, started, submitted, opened, linked, calls, state, context, typed, acks, ackBodies, contexts, core, replies, deliveries }
 }
 
 function command(args: string) {
@@ -102,7 +125,7 @@ test('/voice-relay starts the server, links the session by folder and submits a 
   expect(run.started).toHaveLength(1)
   expect(run.started[0]?.argv.slice(-2)).toEqual(['voice-relay', 'start'])
   expect(run.started[0]?.env).toEqual({ VOICE_RELAY_PORT: '7999' })
-  expect(run.linked).toEqual(['shop /work/shop'])
+  expect(run.linked).toEqual(['manual shop /work/shop'])
   expect(run.opened).toEqual(['client'])
   expect(run.submitted).toEqual([{ text: 'The operator says: "run the lint"', asUser: true }])
   await $.command.run(command('off'))
@@ -116,7 +139,7 @@ test('/voice-relay links again after the server forgot the session', { options: 
   await $.command.run(command(''))
   await clock.advance(2000)
   await clock.settle()
-  expect(run.linked).toEqual(['shop /work/shop', 'shop /work/shop'])
+  expect(run.linked).toEqual(['manual shop /work/shop', 'auto shop /work/shop'])
   await $.command.run(command('off'))
   await clock.settle()
 })
@@ -149,7 +172,7 @@ test('a session started with VOICE_RELAY_LINK=1 links with no command', { option
   await clock.advance(2000)
   await clock.settle()
   expect(run.started).toHaveLength(1)
-  expect(run.linked).toEqual(['shop /work/shop'])
+  expect(run.linked).toEqual(['manual shop /work/shop'])
   await $.command.run(command('off'))
   await clock.settle()
 })
@@ -165,7 +188,7 @@ test('a prompt after /clear relinks the wanted folder without starting the serve
   run.state.id = 'session-2'
   await $.prompt.submit({ text: 'Continue the hand-over.', asUser: true })
   await clock.settle()
-  expect(run.linked).toEqual(['shop /work/shop', 'shop /work/shop'])
+  expect(run.linked).toEqual(['manual shop /work/shop', 'auto shop /work/shop'])
   expect(run.calls).toContain('/claude/link session-2')
   expect(run.started).toHaveLength(1)
   await $.command.run(command('off'))
@@ -221,7 +244,7 @@ test('session start starts a stopped server for a remembered folder', { options:
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
   await clock.settle()
   expect(run.started).toHaveLength(1)
-  expect(run.linked).toEqual(['shop /work/shop'])
+  expect(run.linked).toEqual(['manual shop /work/shop'])
   await $.command.run(command('off'))
   await clock.settle()
 })
@@ -336,14 +359,61 @@ for (const mode of ['dropped rewrite', 'missing context']) {
 
 const voiceTool = 'mcp__voice-relay__voice_update'
 
+test('prompt after forget refuses automatic relink and leaves folders alone', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  run.state.up = true
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.command.run(command(''))
+  await clock.settle()
+  await $.command.run(command('off'))
+  await clock.settle()
+  expect(run.state.forgotten).toEqual(['/work/shop'])
+  await $.session.end({ reason: 'clear', sessionId: 'session-1' } as any)
+  run.state.id = 'session-2'
+  await $.prompt.submit({ text: 'Continue.', asUser: true })
+  await clock.settle()
+  expect(run.linked).toHaveLength(1)
+  expect(run.state.folders).toEqual([])
+})
+
+test('manual /voice-relay after forget links again', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [])
+  run.state.up = true
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await $.command.run(command(''))
+  await $.command.run(command('off'))
+  await clock.settle()
+  run.state.forgotten = ['/work/shop']
+  run.state.folders = []
+  await $.command.run(command(''))
+  await clock.settle()
+  expect(run.state.forgotten).toEqual([])
+  expect(run.state.folders).toEqual(['/work/shop'])
+  expect(run.linked.at(-1)?.startsWith('manual')).toBe(true)
+})
+
+test('voice_unlink registers and forgets like off', { options: { port: 7999 } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const run = setup(on, [], { VOICE_RELAY_LINK: '1' })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  await clock.settle()
+  expect(run.registered.some(tool => tool.name === 'voice_unlink')).toBe(true)
+  const answer = await $.tool.call({ tool: 'mcp__voice-relay__voice_unlink' })
+  expect(answer).toEqual({ result: 'unlinked' })
+  expect(run.state.forgotten).toEqual(['/work/shop'])
+})
+
 test('session start registers voice_update with its schema in the prompt', async ($, on) => {
   const run = setup(on, [])
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
-  expect(run.registered).toHaveLength(1)
-  expect(run.registered[0].name).toBe('voice_update')
-  expect(run.registered[0].isDeferred).toBe(false)
-  expect(run.registered[0].inputSchema.required).toEqual(['kind', 'text'])
-  expect(run.registered[0].inputSchema.properties.kind.enum).toEqual(['needs-you', 'milestone', 'done'])
+  expect(run.registered).toHaveLength(2)
+  expect(run.registered.find(tool => tool.name === 'voice_update')?.name).toBe('voice_update')
+  const voiceUpdate = run.registered.find(tool => tool.name === 'voice_update')
+  expect(voiceUpdate?.isDeferred).toBe(false)
+  expect(voiceUpdate?.inputSchema.required).toEqual(['kind', 'text'])
+  expect(voiceUpdate?.inputSchema.properties.kind.enum).toEqual(['needs-you', 'milestone', 'done'])
 })
 
 test('voice_update serves outcomes, validates inputs and marks subagents', async ($, on) => {
@@ -394,4 +464,16 @@ test('voice_update before linking returns without HTTP', async ($, on) => {
   expect(answer).toEqual({ result: 'not linked' })
   expect(run.updates).toEqual([])
   expect(run.calls).toEqual([])
+})
+
+
+test('failed unlink is reported by tool and command', { options: { port: 7999 } }, async ($, on) => {
+  const run = setup(on, [])
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work/shop' })
+  run.unlinkReply.status = 500
+  run.unlinkReply.text = 'unlink failed'
+  expect(await $.tool.call({ tool: 'mcp__voice-relay__voice_unlink' })).toEqual({ result: 'not unlinked: unlink failed' })
+  const result = await $.command.run(command('off'))
+  expect(result.text).toBe('not unlinked: unlink failed')
+  expect(JSON.stringify(run.statuses)).toContain('not unlinked: unlink failed')
 })

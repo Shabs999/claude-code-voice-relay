@@ -54,6 +54,12 @@ export const register: Register = (on, options) => {
           },
         },
       })
+      await $.tool.register({
+        name: 'voice_unlink',
+        isDeferred: false,
+        description: 'Takes this session off the voice link and keeps it off until the operator types /voice-relay here again. Use only when the operator asks.',
+        inputSchema: { type: 'object', properties: {} },
+      })
     } catch {
       $.ui.log('The voice_update tool could not be registered.')
     }
@@ -68,7 +74,12 @@ export const register: Register = (on, options) => {
       link.attempt += 1
       link.on = false
       $.ui.status(undefined)
-      await call($, link, args === 'quit' ? '/desktop/quit' : '/claude/unlink', { forget: true, cwd: await $.session.cwd() })
+      const reply = await call($, link, args === 'quit' ? '/desktop/quit' : '/claude/unlink', { forget: true, cwd: await $.session.cwd() })
+      if (reply.status !== 204) {
+        const text = `not unlinked: ${reply.text || (reply.status ? `HTTP ${reply.status}` : 'server unavailable')}`
+        $.ui.status(text)
+        return { text }
+      }
       return { text: args === 'quit' ? 'The voice server stops for all sessions.' : 'Voice link off in this session.' }
     }
     if (args === 'settings') {
@@ -79,6 +90,15 @@ export const register: Register = (on, options) => {
     void connect($, link, options)
     return { text: `Voice link starting. The voice window opens at ${link.base}/voice.` }
   }).catch(() => ({ text: 'The voice link did not start. Run /voice-relay again.' }))
+
+  on('tool.call', { tool: 'mcp__voice-relay__voice_unlink' }, async ($, e) => {
+    link.disabled = true
+    link.attempt += 1
+    link.on = false
+    $.ui.status(undefined)
+    const reply = await call($, link, '/claude/unlink', { forget: true, cwd: await $.session.cwd() })
+    return { result: reply.status === 204 ? 'unlinked' : `not unlinked: ${reply.text || (reply.status ? `HTTP ${reply.status}` : 'server unavailable')}` }
+  }).catch(() => ({ result: 'not unlinked: request failed' }))
 
   on('tool.call', { tool: 'mcp__voice-relay__voice_update' }, async ($, e) => {
     if (!link.on) return { result: 'not linked' }
@@ -183,9 +203,17 @@ async function locallyWanted($: EngineInterface): Promise<boolean> {
   const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
   if (home === undefined) return false
   try {
+    const cwd = await $.session.cwd()
     const folders: unknown = JSON.parse(await $.fs.read(`${home}/.config/voice-relay/linked.json`))
-    return Array.isArray(folders) && folders.every(folder => typeof folder === 'string') &&
-      folders.includes(await $.session.cwd())
+    if (!(Array.isArray(folders) && folders.every(folder => typeof folder === 'string'))) return false
+    if (!folders.includes(cwd)) return false
+    try {
+      const forgotten: unknown = JSON.parse(await $.fs.read(`${home}/.config/voice-relay/forgotten.json`))
+      if (Array.isArray(forgotten) && forgotten.every(folder => typeof folder === 'string')) {
+        return !forgotten.includes(cwd)
+      }
+    } catch { /* no forgotten file */ }
+    return true
   } catch { return false }
 }
 
@@ -205,7 +233,7 @@ async function relink($: EngineInterface, link: Link, options: PluginOptions, se
 async function connect($: EngineInterface, link: Link, options: PluginOptions, automatic = false): Promise<void> {
   const attempt = ++link.attempt
   link.on = false
-  if (!(await (automatic ? up($, link) : ready($, link, options))) || link.attempt !== attempt || !(await linkSession($, link))) return
+  if (!(await (automatic ? up($, link) : ready($, link, options))) || link.attempt !== attempt || !(await linkSession($, link, automatic))) return
   link.on = true
   if (!link.polling) void poll($, link)
   await call($, link, '/desktop/open', { page: 'client' })
@@ -242,10 +270,10 @@ async function start($: EngineInterface, options: PluginOptions): Promise<boolea
   return true
 }
 
-async function linkSession($: EngineInterface, link: Link): Promise<boolean> {
+async function linkSession($: EngineInterface, link: Link, automatic = false): Promise<boolean> {
   const cwd = await $.session.cwd()
   const folder = cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? 'session'
-  const reply = await call($, link, '/claude/link', { name: folder, cwd })
+  const reply = await call($, link, '/claude/link', { name: folder, cwd, automatic })
   if (reply.status !== 200) {
     $.ui.status(`the voice server answers ${reply.status || 'nothing'}`)
     return false
@@ -261,7 +289,7 @@ async function poll($: EngineInterface, link: Link) {
     const { status, text } = await call($, link, '/claude/next')
     if (!link.on) break
     if (status === 409) {
-      if (!(await linkSession($, link))) await pause($, RETRY_MS)
+      if (!(await linkSession($, link, true))) await pause($, RETRY_MS)
     } else if (status === 200 || status === 204) {
       $.ui.status(`connected as ${link.name}`)
       if (status === 200) {
@@ -296,7 +324,10 @@ async function up($: EngineInterface, link: Link): Promise<boolean> {
 }
 
 /** One bridge call: a POST with a body, else a GET. Status 0 means no answer. */
-async function call($: EngineInterface, link: Link, path: string, body?: Record<string, string | boolean | string[]>): Promise<Reply> {
+async function call(
+  $: EngineInterface, link: Link, path: string,
+  body?: Record<string, string | boolean | string[]>,
+): Promise<Reply> {
   link.headers ??= await headers($)
   if (link.headers === undefined) return { status: 0, text: '' }
   const init = body === undefined ? { headers: link.headers } : { method: 'POST', headers: link.headers, body: JSON.stringify(body) }

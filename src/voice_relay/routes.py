@@ -7,7 +7,6 @@ import hmac
 import secrets
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -98,28 +97,64 @@ def mount(
     async def link(request: Request) -> Response:
         authorize(request)
         body = await _body(request)
-        name = await bridge.link(_session_id(request), _text(body, "name"), _text(body, "cwd", ""))
-        settings.remember_folder(_text(body, "cwd", ""))
+        cwd = _text(body, "cwd", "")
+        automatic = body.get("automatic") is True
+        if automatic and not settings.folder_wanted(cwd):
+            raise HTTPException(403, "folder: not wanted for automatic relink")
+        name = await bridge.link(_session_id(request), _text(body, "name"), cwd)
+        if not automatic:
+            settings.remember_folder(cwd)
         return JSONResponse({"name": name})
 
     @app.post("/claude/unlink")
     async def unlink(request: Request) -> Response:
         authorize(request)
         body = await _body(request)
-        session_id = _session_id(request)
-        if body.get("forget") is True:
-            folder = (
-                bridge.sessions[session_id].folder
-                if session_id in bridge.sessions else _text(body, "cwd", "")
+        caller = _session_id(request)
+        name = body["name"] if "name" in body else None
+        cwd = body["cwd"] if "cwd" in body else None
+        if isinstance(name, str):
+            name = name.strip()
+        elif name is not None:
+            raise HTTPException(400, f"name: expected a string, got {type(name).__name__}")
+        if isinstance(cwd, str):
+            cwd = cwd.strip()
+        elif cwd is not None:
+            raise HTTPException(400, f"cwd: expected a string, got {type(cwd).__name__}")
+        if name is None and (cwd is not None or body.get("forget") is True):
+            own = None
+            if caller in bridge.sessions:
+                own = bridge.sessions[caller]
+            for folder in (cwd, own.folder if own is not None else None):
+                if folder:
+                    settings.remember_folder(folder, forget=True)
+            target = (caller, own) if own is not None else bridge.resolve_unlink(
+                cwd=cwd, caller=caller,
             )
-            settings.remember_folder(folder, forget=True)
+            if target is not None:
+                await bridge.unlink(target[0])
+            return Response(status_code=204)
+        target = bridge.resolve_unlink(
+            name=name if "name" in body else None,
+            cwd=cwd if "cwd" in body else None,
+            caller=caller,
+        )
+        if target is None or (
+            ("name" in body or "cwd" in body) and target[1] is None
+        ):
+            raise HTTPException(404, "no linked session matched name or folder")
+        session_id, session = target
+        if body.get("forget") is True:
+            folder = session.folder if session is not None else _optional_cwd(body)
+            if folder:
+                settings.remember_folder(folder, forget=True)
         await bridge.unlink(session_id)
         return Response(status_code=204)
 
     @app.get("/claude/wanted")
     async def wanted(request: Request, cwd: str) -> Response:
         authorize(request)
-        return JSONResponse({"wanted": str(Path(cwd).resolve()) in settings.wanted_folders()})
+        return JSONResponse({"wanted": settings.folder_wanted(cwd)})
 
     @app.get("/claude/next")
     async def next_command(request: Request) -> Response:
@@ -362,3 +397,12 @@ def _session_id(request: Request) -> str:
     if not session_id:
         raise HTTPException(400, f"{SESSION_HEADER}: expected a Claude Code session id")
     return session_id
+
+
+def _optional_cwd(body: dict[str, Any]) -> str:
+    value = body.get("cwd", "")
+    if not isinstance(value, str):
+        raise HTTPException(400, f"cwd: expected a string, got {type(value).__name__}")
+    return value
+
+

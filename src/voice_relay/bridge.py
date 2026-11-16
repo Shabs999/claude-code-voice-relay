@@ -479,6 +479,22 @@ class Bridge:
                 self._current = session
         return session.name
 
+    def resolve_unlink(
+        self, *, name: str | None = None, cwd: str | None = None, caller: str,
+    ) -> tuple[str, Session] | None:
+        if name is not None or cwd is not None:
+            matches: list[tuple[str, Session]] = []
+            for session_id, session in self.sessions._by_id.items():
+                if name is not None:
+                    if session.name == name.strip() or key(session.name) == key(name):
+                        matches.append((session_id, session))
+                elif cwd is not None and session.folder == str(Path(cwd).resolve()):
+                    matches.append((session_id, session))
+            return matches[0] if len(matches) == 1 else None
+        if caller in self.sessions:
+            return caller, self.sessions[caller]
+        return caller, None
+
     async def unlink(self, session_id: str) -> None:
         if session_id not in self.sessions:
             return
@@ -486,6 +502,16 @@ class Bridge:
         self.sessions.unlink(session_id)
         if self._current is session:
             self._current = None
+        if self._aimed is session:
+            self._aimed = None
+        self._updates = [item for item in self._updates if item.session is not session]
+        self._update_seen = [
+            (item, outcome) for item, outcome in self._update_seen
+            if item.session is not session
+        ]
+        self._missed = deque(
+            (item for item in self._missed if item[2] != session.name), maxlen=500,
+        )
         self._linked_said = None
         dropped = time.time()
         self._last_dropped = (session.name, dropped)
@@ -557,6 +583,11 @@ class Bridge:
             self._updates.append(item)
             if self._speaker is None or self._speaker.done():
                 self._speaker = asyncio.create_task(self._speak_updates())
+        if self._telegram is not None:
+            try:
+                await self._telegram.on_update(session, kind, text, options)
+            except Exception as error:
+                logger.warning("telegram: update hook failed: {}", type(error).__name__)
         return outcome
 
     def _remember_update(self, item: Update) -> None:

@@ -397,8 +397,87 @@ async def test_wanted_routes_persist_and_forget(
         await client.post("/claude/link", headers=HEADERS, json=body)
         await client.post("/claude/unlink", headers=HEADERS, json={"forget": True})
         assert settings.wanted_folders() == set()
+        assert settings.forgotten_folders() == {folder}
         response = await client.get("/claude/wanted", headers=HEADERS, params={"cwd": folder})
         assert response.json() == {"wanted": False}
+        for task in list(bridge._drops.values()):
+            task.cancel()
+
+
+async def test_automatic_link_after_forget_does_not_re_add_linked_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voice_relay import settings
+
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    app = FastAPI()
+    bridge = Bridge(interval=0)
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token=TOKEN, port=7860, poll=0)
+    folder = str(tmp_path / "privacy")
+    privacy_headers = {**HEADERS, "x-claude-session": "privacy-sid"}
+    workspace_headers = {**HEADERS, "x-claude-session": "workspace-sid"}
+    body = {"name": "Privacy OS", "cwd": folder}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+        async def post_link(headers: dict[str, str], payload: dict[str, object]) -> httpx.Response:
+            return await client.post("/claude/link", headers=headers, json=payload)
+
+        assert (await post_link(privacy_headers, body)).status_code == 200
+        assert settings.wanted_folders() == {folder}
+        assert (
+            await client.post(
+                "/claude/unlink",
+                headers=workspace_headers,
+                json={"forget": True, "name": "Privacy OS"},
+            )
+        ).status_code == 204
+        assert settings.wanted_folders() == set()
+        assert settings.forgotten_folders() == {folder}
+        auto = {**body, "automatic": True}
+        assert (await post_link(privacy_headers, auto)).status_code == 403
+        assert settings.wanted_folders() == set()
+        assert "privacy-sid" not in bridge.sessions
+        assert (await post_link(privacy_headers, body)).status_code == 200
+        assert settings.wanted_folders() == {folder}
+        assert settings.forgotten_folders() == set()
+        for task in list(bridge._drops.values()):
+            task.cancel()
+
+
+async def test_unlink_by_name_forgets_target_not_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from voice_relay import settings
+
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    app = FastAPI()
+    bridge = Bridge(interval=0)
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token=TOKEN, port=7860, poll=0)
+    shop = str(tmp_path / "shop")
+    comms = str(tmp_path / "comms")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+        await client.post(
+            "/claude/link",
+            headers={**HEADERS, "x-claude-session": "shop-id"},
+            json={"name": "shop", "cwd": shop},
+        )
+        await client.post(
+            "/claude/link",
+            headers={**HEADERS, "x-claude-session": "comms-id"},
+            json={"name": "Comms OS", "cwd": comms},
+        )
+        settings.remember_folder(shop)
+        settings.remember_folder(comms)
+        response = await client.post(
+            "/claude/unlink",
+            headers={**HEADERS, "x-claude-session": "shop-id"},
+            json={"forget": True, "name": "Comms OS"},
+        )
+        assert response.status_code == 204
+        assert "comms-id" not in bridge.sessions
+        assert "shop-id" in bridge.sessions
+        assert comms in settings.forgotten_folders()
+        assert comms not in settings.wanted_folders()
+        assert shop in settings.wanted_folders()
         for task in list(bridge._drops.values()):
             task.cancel()
 
@@ -656,3 +735,32 @@ async def test_unknown_explicit_session_with_one_linked_project(text, expected):
 ])
 def test_spoken_project_matching(name, text, expected):
     assert sessions.mentioned(name, text) is expected
+
+
+async def test_self_unlink_shared_and_offline(tmp_path, monkeypatch) -> None:
+    from voice_relay import settings
+
+    monkeypatch.setattr(settings, "CONFIG_DIR", tmp_path)
+    app = FastAPI()
+    bridge = Bridge(interval=0)
+    routes.mount(app, bridge=bridge, microphone=Microphone(), token=TOKEN, port=7860, poll=0)
+    folder = str(tmp_path / "shared")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+        for sid in ("one", "two"):
+            await client.post("/claude/link", headers={**HEADERS, "x-claude-session": sid},
+                              json={"name": sid, "cwd": folder})
+        for sid in ("one", "offline"):
+            settings.remember_folder(folder)
+            response = await client.post(
+                "/claude/unlink", headers={**HEADERS, "x-claude-session": sid},
+                json={"cwd": folder, "forget": True},
+            )
+            assert response.status_code == 204
+            assert folder in settings.forgotten_folders()
+            assert folder not in settings.wanted_folders()
+            assert "one" not in bridge.sessions
+        response = await client.post("/claude/unlink", headers=HEADERS,
+                                     json={"name": "unknown", "forget": True})
+        assert response.status_code == 404
+    for task in list(bridge._drops.values()):
+        task.cancel()
