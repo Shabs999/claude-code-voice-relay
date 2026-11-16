@@ -18,7 +18,7 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 
 from . import settings, terminal
-from .record import Line, filler
+from .record import Line, filler, task_message
 from .sessions import ABORT, TASK, Session, Sessions, key, mentioned
 
 DEVELOPER = "developer"
@@ -33,6 +33,7 @@ ANSWER_SPLIT = (
 STOPPED = "(The operator stopped this turn before it finished.)"  # the mod's ABORTED
 FALLBACK = "{name} is still working on {task}, no update yet."
 SPEECH_SECONDS = 90.0
+AIM_SECONDS = 600.0
 SPEECH_REFUSAL = (
     "the operator has not asked for this in the last 90 seconds; "
     "say nothing to the operator and wait for their words"
@@ -60,12 +61,12 @@ SESSION = {
 SEND_TASK = FunctionSchema(
     name="send_task",
     description=(
-        "Sends what the operator said to one Claude Code session, as a quote. "
-        "Pass their words as said. Fix only speech recognition errors and drop filler "
-        "sounds such as uh and um. The answer arrives later as a developer message."
+        "Sends the operator's own words, exactly as transcribed, to one Claude Code "
+        "session; you only choose the session. text: a few words saying what the "
+        "request is about, for the log."
     ),
     properties={
-        "text": {"type": "string", "description": "The operator's words."},
+        "text": {"type": "string", "description": "A few words for the log."},
         "session": SESSION,
     },
     required=["text"],
@@ -184,6 +185,8 @@ class Bridge:
         self._exchange: list[Line] = []
         self._utterance = ""
         self._current: Session | None = None
+        self._aimed: Session | None = None
+        self._aimed_at = 0.0
         self._fragment_at = 0.0
         self._spoke_at: float | None = None
         self._join = False
@@ -297,22 +300,53 @@ class Bridge:
         self._gag = True
         await params.result_callback(message + " Say nothing.")
 
-    def operator_said(self, text: str) -> None:
+    def operator_said(self, text: str, *, typed: bool = False) -> None:
         if not text.strip():
             return
         self._gag = False
         self._spoke_at = time.monotonic()
         now = time.time()
-        if self._join and self._exchange and now - self._fragment_at < 20:
+        if (self._join and self._exchange and now - self._fragment_at < 20
+                and self._exchange[-1].typed == typed):
             self._exchange[-1].text += " " + text
         else:
-            self._exchange.append(Line(now, "Shahab", text))
+            self._exchange.append(Line(now, "Shahab", text, typed))
         self._utterance = self._exchange[-1].text
         self._fragment_at, self._join, self._relay = now, True, False
 
     def _operator_spoke_recently(self) -> bool:
         return (self._spoke_at is not None
                 and time.monotonic() - self._spoke_at <= SPEECH_SECONDS)
+
+    def aimed(self) -> str | None:
+        if self._aimed is None or self._aimed not in self.sessions.live():
+            return None
+        if time.monotonic() - self._aimed_at > AIM_SECONDS:
+            return None
+        return self._aimed.name
+
+    def set_aim(self, name: str | None) -> None:
+        if name is None:
+            self._aimed = None
+            return
+        found = self.sessions.find(name)
+        if not isinstance(found, Session) or found not in self.sessions.live():
+            raise ValueError("session: expected a linked session name")
+        self._aimed = found
+        self._aimed_at = time.monotonic()
+
+    def _clear_aim(self) -> None:
+        self._aimed = None
+
+    async def operator_text(self, text: str) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
+        self.operator_said(text, typed=True)
+        await worker.queue_frame(
+            LLMMessagesAppendFrame(messages=[{"role": "user", "content": text}], run_llm=True)
+        )
+        return True
 
     def tool_called(self) -> None:
         self._join = False
@@ -604,13 +638,14 @@ class Bridge:
     def _resolve_session(self, name: str, text: str = "") -> Session | str:
         found = self.sessions.find(name)
         live = self.sessions.live()
-        if isinstance(found, Session):
-            return found
         matches = [session for session in live
                    if mentioned(session.name, text) or mentioned(session.name, self._utterance)]
         if len(matches) == 1:
             return matches[0]
-        if name.strip():
+        if (self._aimed is not None and self._aimed in live
+                and time.monotonic() - self._aimed_at <= AIM_SECONDS):
+            return self._aimed
+        if isinstance(found, Session) or name.strip():
             return found
         if len(matches) > 1:
             names = ", ".join(session.name for session in matches)
@@ -627,19 +662,33 @@ class Bridge:
             return
         found = self._resolve_session(
             str(params.arguments.get("session") or ""),
-            str(params.arguments.get("text") or params.arguments.get("then") or ""),
+            self._utterance,
         )
         if isinstance(found, str):
             await params.result_callback(f"not sent: {found}")
             return
+        lines = [line for block in found.record.blocks for line in block.lines]
+        lines.extend(found.record.lines)
+        lines.extend(self._exchange)
+        message = task_message(lines)
+        if not message:
+            await params.result_callback("not sent: nothing the operator said to pass on")
+            return
+        logger.info("send_task model text: {}", str(params.arguments.get("text", "")))
         self._target, self._acted = found, True
-        self._flush_exchange()
+        self._exchange = []
+        self._join = False
+        found.record.lines = []
+        for block in list(found.record.blocks):
+            found.record.ack(block.id)
         busy, found.running = found.running, True
         found.asked_at = time.monotonic()
-        found.asked_text = str(params.arguments.get("text", ""))
+        found.asked_text = "\n".join(line.text for line in sorted(
+            lines, key=lambda line: line.wall_time) if line.speaker == "Shahab")
         found.reminded = False
-        found.send(TASK, QUOTE.format(text=found.asked_text))
+        found.send(TASK, message)
         self._current = found
+        self._clear_aim()
         after = ", Claude Code starts it after the current turn" if busy else ""
         await self.say(f"Sent to {found.name}.")
         self._gag = True

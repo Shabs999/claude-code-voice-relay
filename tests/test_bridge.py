@@ -8,11 +8,10 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
+from pipecat.frames.frames import TTSSpeakFrame
 
 from voice_relay import bridge as bridge_module
 from voice_relay import routes, sessions, terminal
-from pipecat.frames.frames import TTSSpeakFrame
-
 from voice_relay.bridge import LINKED, QUOTE, STOPPED, Bridge
 from voice_relay.processors import Microphone
 from voice_relay.sessions import ABORT, CONTEXT, TASK
@@ -79,7 +78,7 @@ async def test_linked_notice_coalesces_across_rapid_links() -> None:
     await asyncio.sleep(0.15)
     linked = _linked_speaks(worker.frames)
     assert len(linked) == 2
-    assert linked[1].text == LINKED.format(names=", ".join(names + ["s7"]))
+    assert linked[1].text == LINKED.format(names=", ".join([*names, "s7"]))
 
 
 async def test_linked_notice_repeats_after_unlink() -> None:
@@ -111,7 +110,8 @@ async def test_a_task_goes_to_the_only_session_without_a_name() -> None:
     await bridge._send_task(call)  # type: ignore[arg-type]
     command = await bridge.sessions["shop"].next(1)
     assert command["kind"] == TASK
-    assert command["text"].startswith(QUOTE.format(text="run the lint"))
+    assert command["text"].startswith("Shahab, by voice (")
+    assert command["text"].endswith("\nrun the lint")
     await bridge._abort(Call(then="fix only the lint"))  # type: ignore[arg-type]
     assert (await bridge.sessions["shop"].next(1)) == {"kind": ABORT, "text": ""}
     assert (await bridge.sessions["shop"].next(1)) == {
@@ -507,8 +507,11 @@ async def test_task_speech_guard(age, tool, monkeypatch):
         assert send.call_count == (1 if tool == "send" else 2)
         if tool == "abort":
             assert send.call_args_list[0].args == (ABORT,)
-        assert send.call_args.args == (TASK, QUOTE.format(text=text if tool == "send"
-                                                        else text.strip()))
+        if tool == "send":
+            assert send.call_args.args[0] == TASK
+            assert send.call_args.args[1].endswith("\nrun the tests")
+        else:
+            assert send.call_args.args == (TASK, QUOTE.format(text=text.strip()))
     else:
         choose.assert_called_once()
         assert call.result == "not opened: no matching project"
@@ -574,7 +577,7 @@ async def test_replay_failed_say_keeps_items(monkeypatch) -> None:
 async def test_send_resolves_spoken_project_or_current(session, source):
     bridge, worker = await voiced("Handsfree", "Workspace")
     bridge.operator_said("What is going on with the hands free project?"
-                         if source == "utterance" else "What is going on?")
+                         if source in {"utterance", "text"} else "What is going on?")
     if source == "current":
         await bridge.answer(bridge.sessions["Workspace"], "Ready.")
     call = Call(text="Hansfree, what's going on?" if source == "text" else "status")
@@ -600,11 +603,12 @@ async def test_send_resolves_spoken_project_or_current(session, source):
         task.cancel()
 
 
-async def test_explicit_session_wins_and_abort_uses_spoken_fallback():
+async def test_spoken_session_wins_and_abort_uses_spoken_fallback():
     bridge, _ = await voiced("Handsfree", "Workspace")
     bridge.operator_said("Hands free status")
     await bridge._send_task(Call(session="Workspace", text="Hansfree status"))
-    assert bridge._current is bridge.sessions["Workspace"]
+    assert bridge._current is bridge.sessions["Handsfree"]
+    await bridge.sessions["Handsfree"].next(1)
     await bridge._abort(Call())
     assert (await bridge.sessions["Handsfree"].next(1))["kind"] == ABORT
 
@@ -615,7 +619,7 @@ async def test_multiple_mentions_do_not_use_current(source, session):
     bridge, _ = await voiced("Handsfree", "Workspace", "Other")
     bridge._current = bridge.sessions["Workspace"]
     phrase = "handsfree and workspace both need checks"
-    bridge.operator_said(phrase if source == "utterance" else "run checks")
+    bridge.operator_said(phrase)
     call = Call(session=session, text=phrase if source == "text" else "run checks")
     await bridge._send_task(call)
     if session:
@@ -632,8 +636,8 @@ async def test_multiple_mentions_do_not_use_current(source, session):
 async def test_unknown_explicit_session_with_one_linked_project(text, expected):
     bridge, _ = await voiced("shop")
     bridge._current = bridge.sessions["shop"]
-    bridge.operator_said("run checks")
-    call = Call(session="unknown", text=text)
+    bridge.operator_said(text)
+    call = Call(session="unknown", text="log summary")
     await bridge._send_task(call)
     assert call.result.startswith(expected)
     if expected == "not sent":

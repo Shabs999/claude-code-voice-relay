@@ -101,6 +101,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
   transition: background .15s, transform .15s;
 }
 .tag:active, .tag.pressed { transform: scale(.96); background: var(--wa-color-neutral-fill-quiet); }
+.tag.aimed { outline: 2px solid var(--dot); outline-offset: 0; }
 .tag.waiting { outline: 1px solid var(--waiting); outline-offset: -1px; }
 .tag .name { line-height: 1; }
 .tag .waits { color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); }
@@ -119,6 +120,20 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .line { max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
+.compose { display: flex; gap: 8px; align-items: center; padding-top: 8px; flex: none; }
+.compose .typed {
+  flex: 1; min-width: 0; min-height: 44px; margin: 0; padding: 10px 12px; font: inherit; font-size: 16px;
+  border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
+  background: var(--wa-color-surface-default); color: var(--wa-color-text-normal);
+}
+.compose .typed:focus-visible { outline: 3px solid var(--wa-color-focus); outline-offset: 0; border-color: var(--brand); }
+.compose .send {
+  min-width: 44px; min-height: 44px; padding: 0 14px; border: 0; border-radius: var(--wa-border-radius-m);
+  background: var(--brand); color: #fff; font: inherit; font-size: var(--wa-font-size-s); font-weight: var(--wa-font-weight-semibold);
+  cursor: pointer; flex: none;
+}
+.compose .send:active { transform: scale(.97); }
+.compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--bad); }
 </style>
 </head>
 <body>
@@ -179,6 +194,11 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
+      <form class="compose" id="compose">
+        <input class="typed" id="typed" type="text" enterkeyhint="send" autocomplete="off" maxlength="2000" placeholder="Message the Dispatcher…" />
+        <button class="send" type="submit">Send</button>
+      </form>
+      <p class="compose-note hidden" id="compose-note" role="status"></p>
     </div>
   </section>
 </main>
@@ -207,7 +227,7 @@ const audio = new Audio();
 let state = null, picks = {}, typed = {}, client = null, transport = null, localMicStream = null, connected = false, muted = true, speaking = false, lastAgent = null;
 let wanted = false, retryTimer = null, retryStep = 0;
 const PAGE_ID = Math.random().toString(36).slice(2, 8);
-let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot;
+let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot, aimed;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
 let speed = 1.5, voice = "ash";
@@ -746,13 +766,24 @@ function projectColor(name) {
 
 function sessionTag(session) {
   const doing = sessionDoing(session);
-  const btn = el("button", { type: "button", class: `tag ${doing}`, style: `--dot: ${projectColor(session.name)}`, "data-session": session.name, "aria-label": `${session.name}, ${SESSION_ARIA[doing]}` },
+  const selected = session.name === aimed;
+  const btn = el("button", {
+    type: "button",
+    class: `tag ${doing}${selected ? " aimed" : ""}`,
+    style: `--dot: ${projectColor(session.name)}`,
+    "data-session": session.name,
+    "aria-label": `${session.name}, ${SESSION_ARIA[doing]}`,
+    "aria-pressed": selected ? "true" : "false",
+  },
     el("span", { class: `dot ${doing}` }),
     el("span", { class: "name", text: session.name }),
     doing === "waiting" ? el("span", { class: "waits", text: "waits" }) : null);
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     btn.classList.add("pressed");
     setTimeout(() => btn.classList.remove("pressed"), 150);
+    try {
+      await desktopApi("/desktop/target", { session: selected ? null : session.name });
+    } catch { /* poll will reconcile */ }
   });
   return btn;
 }
@@ -778,6 +809,8 @@ async function poll() {
     const back = pollFailCount > 0;
     pollFailCount = 0;
     lastPollVoice = now.voice;
+    aimed = now.aimed ?? null;
+    $("typed").placeholder = aimed ? `Message ${aimed}…` : "Message the Dispatcher…";
     renderSessions(now.sessions);
     if (connected && !connecting && now.muted !== muted) {
       const wasMuted = muted;
@@ -804,6 +837,28 @@ async function poll() {
   }
   setTimeout(poll, 2000);
 }
+
+$("compose").addEventListener("submit", async event => {
+  event.preventDefault();
+  const field = $("typed");
+  const sentValue = field.value;
+  const text = sentValue.trim();
+  if (!text) return;
+  $("compose-note").classList.add("hidden");
+  const reply = await fetch("/desktop/say", {
+    method: "POST",
+    headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (reply.status === 409) {
+    $("compose-note").textContent = "Voice is not connected";
+    $("compose-note").classList.remove("hidden");
+    return;
+  }
+  if (!reply.ok) return;
+  if (field.value === sentValue) field.value = "";
+  say("you", text);
+});
 
 $("mic").addEventListener("click", async () => {
   if (!connected) { $("hint").textContent = ""; await connect(false, "tap"); return; }

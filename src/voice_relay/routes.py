@@ -204,6 +204,7 @@ def mount(
                                if bridge._hold_until not in (None, float("inf")) else None),
                 "prefs": {"speed": prefs.speed, "voice": prefs.voice},
                 "sessions": bridge.state(),
+                "aimed": bridge.aimed(),
                 "problems": len(settings.problems()),
                 "config": settings.version(),
                 "boot": boot,
@@ -252,6 +253,40 @@ def mount(
         if not isinstance(muted, bool):
             raise HTTPException(400, "muted: expected true or false")
         microphone.muted = muted
+        return Response(status_code=204)
+
+    @app.post("/desktop/say")
+    async def say(request: Request) -> Response:
+        authorize(request)
+        text = _text(await _body(request), "text").strip()
+        if not text:
+            raise HTTPException(400, "text: expected non-empty text")
+        if len(text) > 2000:
+            raise HTTPException(400, "text: expected at most 2000 characters")
+        if not bridge.voice():
+            return JSONResponse({"error": "voice not connected"}, status_code=409)
+        await bridge.operator_text(text)
+        return Response(status_code=204)
+
+    @app.post("/desktop/target")
+    async def target(request: Request) -> Response:
+        authorize(request)
+        body = await _body(request)
+        if "session" not in body:
+            raise HTTPException(400, "session: expected a string or null")
+        session = body.get("session")
+        if session is not None:
+            if not isinstance(session, str):
+                raise HTTPException(400, "session: expected a string or null")
+            session = session.strip()
+            if not session:
+                raise HTTPException(400, "session: expected a non-empty name or null")
+        else:
+            session = None
+        try:
+            bridge.set_aim(session)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
         return Response(status_code=204)
 
     @app.post("/desktop/hold")
