@@ -208,6 +208,11 @@ def mount(
                 "problems": len(settings.problems()),
                 "config": settings.version(),
                 "boot": boot,
+                "telegram": (
+                    bridge._telegram.mode()
+                    if bridge._telegram is not None
+                    else "off"
+                ),
             }
         )
 

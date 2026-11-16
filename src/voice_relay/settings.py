@@ -214,6 +214,11 @@ def catchup_seconds() -> float:
     return _number(environment(), "VOICE_RELAY_CATCHUP_SECONDS", 28800.0, 60.0, 86400.0)
 
 
+def telegram_map_path() -> Path:
+    raw = _text(environment(), "VOICE_RELAY_TELEGRAM_MAP")
+    return Path(raw).expanduser() if raw else CONFIG_DIR / "telegram-map.json"
+
+
 def prompt() -> str:
     """Gives the system prompt: the operator's copy or the built-in one, their rules appended."""
     own = texts()

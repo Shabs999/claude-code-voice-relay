@@ -100,7 +100,7 @@ def serve() -> None:
         app, bridge=BRIDGE, microphone=MICROPHONE, token=token, port=port, poll=POLL_SECONDS, prefs=PREFS
     )
     web.mount(app, token=token)
-    desktop.lifespan(app, port=port, active=BRIDGE.active)
+    desktop.lifespan(app, port=port, active=BRIDGE.active, bridge=BRIDGE)
     for problem in settings.problems():
         logger.warning("voice-relay: {}", problem)
     sys.modules["__main__"].bot = bot  # type: ignore[attr-defined]  # the runner looks there

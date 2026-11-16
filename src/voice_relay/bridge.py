@@ -214,6 +214,7 @@ class Bridge:
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
+        self._telegram: Any = None
 
     def held(self) -> bool:
         if self._hold_until is None:
@@ -608,6 +609,11 @@ class Bridge:
             item for item in self._updates
             if not (item.session is session and item.kind in {"milestone", "done"})
         ]
+        if self._telegram is not None:
+            try:
+                await self._telegram.on_answer(session, text)
+            except Exception as error:
+                logger.warning("telegram: answer hook failed: {}", type(error).__name__)
         spoken, detail = split_answer(text)
         content = (
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
@@ -625,6 +631,11 @@ class Bridge:
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         session.asked_at = None
+        if self._telegram is not None:
+            try:
+                await self._telegram.on_waiting(session, action)
+            except Exception as error:
+                logger.warning("telegram: waiting hook failed: {}", type(error).__name__)
         if self.held():
             self._remember("waiting", session.name, action)
             return False
@@ -654,6 +665,22 @@ class Bridge:
             return self._current
         return found
 
+    def _dispatch_task(self, session: Session, message: str, *, asked: str = "") -> bool:
+        busy, session.running = session.running, True
+        session.asked_at = time.monotonic()
+        session.asked_text = asked or message
+        session.reminded = False
+        session.send(TASK, message)
+        self._current = session
+        self._clear_aim()
+        return busy
+
+    async def send_task_direct(self, session: Session, message: str) -> bool:
+        if session not in self.sessions.live():
+            return False
+        self._dispatch_task(session, message)
+        return True
+
     async def _send_task(self, params: FunctionCallParams) -> None:
         if not self._operator_spoke_recently():
             logger.warning("task refused: no operator speech in the last 90 s (text: {})",
@@ -681,14 +708,9 @@ class Bridge:
         found.record.lines = []
         for block in list(found.record.blocks):
             found.record.ack(block.id)
-        busy, found.running = found.running, True
-        found.asked_at = time.monotonic()
-        found.asked_text = "\n".join(line.text for line in sorted(
-            lines, key=lambda line: line.wall_time) if line.speaker == "Shahab")
-        found.reminded = False
-        found.send(TASK, message)
-        self._current = found
-        self._clear_aim()
+        busy = self._dispatch_task(found, message, asked=("\n".join(
+            line.text for line in sorted(lines, key=lambda line: line.wall_time)
+            if line.speaker == "Shahab")))
         after = ", Claude Code starts it after the current turn" if busy else ""
         await self.say(f"Sent to {found.name}.")
         self._gag = True

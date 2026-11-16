@@ -68,19 +68,26 @@ def launch() -> int:
     return 1
 
 
-def lifespan(app: FastAPI, *, port: int, active: Callable[[], bool]) -> None:
+def lifespan(app: FastAPI, *, port: int, active: Callable[[], bool], bridge: Any = None) -> None:
     """Adds the log file, the tray process and the idle stop for the app's life."""
     outer = app.router.lifespan_context
 
     @asynccontextmanager
     async def desktop(app: FastAPI) -> AsyncIterator[None]:
+        from . import telegram
+
         logger.add(LOG_FILE, level="DEBUG", rotation="20 MB", retention=2, enqueue=True)
         logging.getLogger("uvicorn.access").disabled = True  # the tray polls every 2 s
         tray = _tray(port)
         idle = asyncio.create_task(_idle_stop(active))
+        door = telegram.Door(bridge) if bridge is not None else None
+        if door is not None:
+            await door.start()
         try:
             yield
         finally:
+            if door is not None:
+                await door.stop()
             idle.cancel()
             if tray is not None and tray.poll() is None:
                 tray.terminate()
