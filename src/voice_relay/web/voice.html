@@ -117,7 +117,7 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .empty { margin: 0; color: var(--wa-color-text-quiet); font-size: var(--wa-font-size-xs); padding: 4px 0; }
 
 .log-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
+.log { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
 .line { overflow-wrap: anywhere; max-width: 88%; padding: 7px 11px; border-radius: 14px; font-size: var(--wa-font-size-s); line-height: 1.4; }
 .line.you { align-self: flex-end; background: var(--wa-color-brand-fill-quiet, #eef0ff); color: var(--wa-color-brand-on-quiet, #3730a3); border-bottom-right-radius: 4px; }
 .line.agent { align-self: flex-start; background: var(--wa-color-surface-lowered); border-bottom-left-radius: 4px; }
@@ -136,8 +136,6 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .compose .send:active { transform: scale(.97); }
 .compose-note { margin: 4px 0 0; font-size: var(--wa-font-size-xs); color: var(--bad); }
 
-.feed-wrap { flex: 1; display: flex; flex-direction: column; gap: 4px; max-height: 42%; min-height: 0; border-top: 1px solid var(--wa-color-surface-border); padding-top: 8px; margin-top: 4px; }
-.feed { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
 .feed-card {
   border: 1px solid var(--wa-color-surface-border); border-radius: var(--wa-border-radius-m);
   background: var(--wa-color-surface-lowered); padding: 10px 12px; text-align: left; cursor: pointer;
@@ -152,7 +150,11 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
 .feed-name { font-weight: var(--wa-font-weight-semibold); color: var(--dot); }
 .feed-time { color: var(--wa-color-text-quiet); margin-left: auto; }
 .feed-body { overflow-wrap: anywhere; min-width: 0; font-size: var(--wa-font-size-s); line-height: 1.4; }
-.feed-body.collapsed { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.feed-body { white-space: pre-wrap; }
+.feed-body ol { white-space: normal; padding-left: 24px; }
+.compose-footer { flex: none; background: var(--wa-color-surface-default); }
+body.talking main { padding-bottom: 0; }
+#talk > :not(.log-wrap), .feed-card, .line { flex-shrink: 0; }
 .feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
 .feed-body code { font-family: var(--wa-font-family-code); font-size: .92em; }
 .feed-more { margin-top: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; min-height: 44px; }
@@ -230,10 +232,8 @@ h2 { margin: 0 0 4px; font-size: var(--wa-font-size-xs); text-transform: upperca
     <div class="log-wrap">
       <h2>Conversation</h2>
       <div class="log" id="log" aria-live="polite"></div>
-      <div class="feed-wrap">
-        <h2>Projects</h2>
-        <div class="feed" id="feed" aria-live="polite"></div>
-      </div>
+    </div>
+    <div class="compose-footer" id="compose-footer">
       <div class="reply-chip hidden" id="reply-chip">
         <span id="reply-label"></span>
         <button type="button" id="reply-clear" aria-label="Clear reply">✕</button>
@@ -276,6 +276,7 @@ let wanted = false, retryTimer = null, retryStep = 0;
 const PAGE_ID = Math.random().toString(36).slice(2, 8);
 let voiceMismatchCount = 0, pollFailCount = 0, lastPollVoice, serverBoot, linkBoot, aimed;
 let selectedFiles = [], pickingProject = false, feedBusy = false;
+let feedVersion = 0;
 let feedLast = 0, feedEvents = new Map(), feedExpanded = new Set(), replyTo = null;
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
@@ -817,18 +818,42 @@ function show(phase) {
   if (now !== "off") $("hint").textContent = hint;
 }
 
+new ResizeObserver(() => {
+  const log = $("log"), bottom = nearBottom();
+  log.style.paddingBottom = `${$("compose-footer").offsetHeight}px`;
+  if (bottom) log.scrollTop = log.scrollHeight;
+}).observe($("compose-footer"));
+
+function nearBottom() {
+  const log = $("log");
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 80;
+}
+function normalise(text) { return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(); }
+function matchesEvent(text, event) {
+  const prefix = `${event.session}: `;
+  return event.kind !== "you" && text.toLowerCase().startsWith(prefix.toLowerCase()) &&
+    normalise(text.slice(prefix.length)).slice(0, 40) === normalise(event.spoken).slice(0, 40);
+}
 function say(who, text) {
-  const log = $("log"), last = log.lastElementChild;
-  // recognition cuts one sentence into pieces: the operator's lines in a row stay one bubble
-  const joined = who === "agent" ? lastAgent : last?.classList.contains("you") && who === "you" ? last : null;
-  if (joined) joined.textContent += ` ${text.trim()}`;
-  else {
-    const line = el("div", { class: `line ${who}`, text: text.trim() });
-    log.append(line);
-    lastAgent = who === "agent" ? line : null;
-    while (log.children.length > KEPT_LINES) log.firstElementChild.remove();
+  if (who === "agent" && [...feedEvents.values()].some(event => matchesEvent(text, event))) return;
+  const log = $("log"), bottom = nearBottom();
+  const last = log.lastElementChild;
+  const joined = who === "agent" && lastAgent?.parentNode === log ? lastAgent :
+    who === "you" && last?.dataset.door === "voice" ? last : null;
+  if (joined) {
+    joined.textContent += ` ${text.trim()}`;
+    joined.dataset.spoken = joined.textContent;
+    renderFeed();
+    if (bottom) log.scrollTop = log.scrollHeight;
+    return;
   }
-  log.scrollTop = log.scrollHeight;
+  const line = el("div", { class: `line ${who}`, text: text.trim() });
+  line.dataset.wall = Date.now() / 1000;
+  line.dataset.spoken = text.trim();
+  line.dataset.door = who === "you" ? "voice" : "dispatcher";
+  log.append(line);
+  lastAgent = who === "agent" ? line : null;
+  if (bottom) log.scrollTop = log.scrollHeight;
 }
 
 const SESSION_RANK = { waiting: 0, working: 1, idle: 2 };
@@ -865,6 +890,10 @@ function feedMarkdown(text) {
   }
   html = html.replace(/^#{1,6} +(.+)$/gm, "<b>$1</b>");
   html = html.replace(/^[-*] +/gm, "• ");
+  html = html.replace(/(?:^\d+\. +.+(?:\n|$))+/gm, list => {
+    const items = list.trim().split("\n");
+    return `<ol start="${parseInt(items[0], 10)}">${items.map(row => `<li>${row.replace(/^\d+\. +/, "")}</li>`).join("")}</ol>`;
+  });
   for (let i = slots.length - 1; i >= 0; i--) html = html.replace(`\u0000${i}\u0000`, slots[i]);
   return html;
 }
@@ -884,21 +913,25 @@ async function clearReply() {
 function feedCard(event) {
   if (event.kind === "you") {
     return el("article", { class: "feed-card you" },
-      el("div", { class: "feed-head", text: `You → ${event.session} · via ${event.door} · ${event.time}` }),
+      el("div", { class: "feed-head", text: `You → ${event.session} · ${event.door === "telegram" ? "via Telegram" : ["typing", "typed"].includes(event.door) ? "typed" : `via ${event.door}`} · ${event.time}` }),
       el("div", { text: event.text }),
       el("small", { text: (event.attachments || []).join(", ") }));
   }
   const expanded = feedExpanded.has(event.id);
   const selected = replyTo === event.id;
   const card = el("article", { class: `feed-card${selected ? " selected" : ""}`, "data-id": event.id, style: `--dot: ${projectColor(event.session)}` });
-  const body = el("div", { class: `feed-body${expanded ? "" : " collapsed"}` });
-  body.innerHTML = feedMarkdown(event.text);
+  const lines = event.text.replace(/\r\n/g, "\n").split("\n");
+  const divider = lines.indexOf("---");
+  const full = lines.filter(line => line !== "---").join("\n");
+  const preview = lines.slice(0, divider < 0 ? 3 : divider).join("\n");
+  const body = el("div", { class: "feed-body" });
+  body.innerHTML = feedMarkdown(expanded ? full : preview);
   card.append(
     el("div", { class: "feed-head" },
       el("span", { class: "feed-name", text: event.session }),
       el("span", { class: "feed-time", text: event.time })),
     body);
-  if (!expanded && event.text.split("\n").length > 6) {
+  if (!expanded && full !== preview) {
     const more = el("button", { type: "button", class: "feed-more", text: "more" });
     more.addEventListener("click", click => {
       click.stopPropagation();
@@ -909,8 +942,9 @@ function feedCard(event) {
   }
   if (event.options?.length) {
     const row = el("div", { class: "feed-opts" });
-    for (const n of event.options) {
-      const btn = el("button", { type: "button", class: "feed-opt", text: n, disabled: !!event.answered });
+    for (const [index, n] of event.options.entries()) {
+      const label = event.option_labels?.[index] || n;
+      const btn = el("button", { type: "button", class: "feed-opt", text: `${n} · ${label.length > 30 ? label.slice(0, 30) + "…" : label}`, disabled: !!event.answered });
       btn.addEventListener("click", async click => {
         click.stopPropagation();
         try {
@@ -922,7 +956,7 @@ function feedCard(event) {
       row.append(btn);
     }
     card.append(row);
-    if (event.answered) card.append(el("p", { class: "feed-answered", text: `answered ${event.answered}` }));
+    if (event.answered) card.append(el("p", { class: "feed-answered", text: `answered ${event.answered} · ${event.option_labels?.[event.options.indexOf(event.answered)] || ""}` }));
   }
   card.addEventListener("click", async () => {
     try {
@@ -933,23 +967,35 @@ function feedCard(event) {
 }
 
 function renderFeed() {
-  const box = $("feed");
-  const rows = [...feedEvents.values()].sort((a, b) => a.id - b.id);
-  if (!rows.length) {
-    box.replaceChildren(el("p", { class: "empty", text: "Project messages will show here." }));
-    return;
+  const box = $("log"), bottom = nearBottom();
+  for (const event of [...feedEvents.values()].sort((a, b) => a.id - b.id)) {
+    if (event.kind === "you" && event.door === "voice") continue;
+    const existing = box.querySelector(`[data-id="${event.id}"]`);
+    const duplicate = [...box.children].find(node => event.kind === "you"
+      ? node.dataset.door === event.door && normalise(node.dataset.spoken || "") === normalise(event.text)
+      : node.dataset.door === "dispatcher" && matchesEvent(node.dataset.spoken || "", event));
+    const card = feedCard(event);
+    card.dataset.id = event.id;
+    card.dataset.wall = event.wall;
+    if (event.kind === "you") { card.dataset.door = event.door; card.dataset.spoken = event.text; }
+    if (existing) existing.replaceWith(card);
+    else if (duplicate) duplicate.replaceWith(card);
+    else {
+      const later = [...box.children].find(node => Number(node.dataset.wall) > event.wall);
+      box.insertBefore(card, later || null);
+    }
   }
-  box.replaceChildren(...rows.map(feedCard));
-  box.lastElementChild?.scrollIntoView({ block: "nearest" });
+  if (bottom) box.scrollTop = box.scrollHeight;
 }
 
-async function syncFeed(after) {
+async function syncFeed(after, version) {
   if (feedBusy) return;
   feedBusy = true;
   try {
-    const data = await desktopApi(`/desktop/feed?after=${after}`);
+    const data = await desktopApi(`/desktop/feed?after=${after}&changed_since=${feedVersion}`);
     for (const event of data.events || []) feedEvents.set(event.id, event);
     feedLast = Math.max(after, ...(data.events || []).map(event => event.id));
+    feedVersion = version;
     renderFeed();
   } catch { /* retry on next poll */ }
   finally { feedBusy = false; }
@@ -1000,7 +1046,9 @@ async function poll() {
   try {
     const now = await desktopApi("/desktop/state");
     if ((serverBoot !== undefined && serverBoot !== now.boot) || now.feed_last < feedLast) {
-      feedLast = 0; feedEvents.clear(); feedExpanded.clear(); renderFeed();
+      feedLast = 0; feedVersion = 0;
+      $("log").querySelectorAll("[data-id]").forEach(node => node.remove());
+      feedEvents.clear(); feedExpanded.clear(); renderFeed();
     }
     serverBoot = now.boot;
     if (connected && linkBoot === undefined && serverBoot !== undefined) linkBoot = serverBoot;
@@ -1009,13 +1057,15 @@ async function poll() {
     lastPollVoice = now.voice;
     const aim = now.aimed;
     aimed = aim?.session ?? null;
+    const previousReply = replyTo;
     replyTo = aim?.reply_to ?? null;
+    if (replyTo !== previousReply) renderFeed();
     $("typed").placeholder = aimed ? `Message ${aimed}…` : "Message the Dispatcher…";
     updateReplyChip();
     renderSessions(now.sessions);
-    if (typeof now.feed_last === "number" && now.feed_last !== feedLast) {
+    if (typeof now.feed_last === "number" && (now.feed_last !== feedLast || now.feed_version !== feedVersion)) {
       const after = feedLast;
-      await syncFeed(after);
+      await syncFeed(after, now.feed_version);
     }
     if (connected && !connecting && now.muted !== muted) {
       const wasMuted = muted;

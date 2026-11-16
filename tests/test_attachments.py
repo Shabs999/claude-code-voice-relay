@@ -118,12 +118,14 @@ def test_page_feed_retries_and_resets_after_restart(tmp_path):
     import subprocess
 
     page = Path("src/voice_relay/web/voice.html").read_text()
-    sync = page.split("async function syncFeed(after) {", 1)[1].split(
+    sync = page.split("async function syncFeed(after, version) {", 1)[1].split(
         "function sessionTag", 1)[0]
     reset = page.split('    if ((serverBoot !== undefined', 1)[1].split(
         '    serverBoot = now.boot;', 1)[0]
     script = tmp_path / "feed.mjs"
     script.write_text('''import assert from 'node:assert/strict';
+let feedVersion = 0;
+const $ = () => ({querySelectorAll: () => []});
 let feedLast = 0, feedBusy = false, feedEvents = new Map(), feedExpanded = new Set();
 let attempts = 0, serverBoot = 'old';
 function renderFeed() {}
@@ -131,7 +133,7 @@ async function desktopApi() {
   if (++attempts === 1) throw Error('offline');
   return { events: [{ id: 3 }] };
 }
-async function syncFeed(after) {''' + sync + '''
+async function syncFeed(after, version) {''' + sync + '''
 await syncFeed(0);
 assert.equal(feedLast, 0);
 await syncFeed(0);

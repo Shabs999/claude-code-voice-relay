@@ -272,6 +272,7 @@ def mount(
                 "sessions": bridge.state(),
                 "aimed": bridge.aimed_state(),
                 "feed_last": bridge.feed.last_id(),
+                "feed_version": bridge.feed.version,
                 "problems": len(settings.problems()),
                 "config": settings.version(),
                 "boot": boot,
@@ -403,11 +404,11 @@ def mount(
                                  "names": [path.rsplit("/", 1)[-1] for path in paths]})
 
     @app.get("/desktop/feed")
-    async def feed(request: Request, after: int = 0) -> Response:
+    async def feed(request: Request, after: int = 0, changed_since: int | None = None) -> Response:
         authorize(request)
         if after < 0:
             raise HTTPException(400, "after: expected a non-negative integer")
-        return JSONResponse({"events": bridge.feed.after(after)})
+        return JSONResponse({"events": bridge.feed.after(after, changed_since)})
 
     @app.post("/desktop/target")
     async def target(request: Request) -> Response:

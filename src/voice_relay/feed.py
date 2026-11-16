@@ -67,6 +67,8 @@ class FeedEvent:
     spoken: str
     options: list[str]
     wall: float
+    option_labels: list[str] = field(default_factory=list)
+    version: int = 0
     door: str | None = None
     attachments: list[str] = field(default_factory=list)
     answered: str | None = None
@@ -75,11 +77,13 @@ class FeedEvent:
         row: dict[str, Any] = {
             "id": self.id,
             "time": self.time,
+            "wall": self.wall,
             "session": self.session,
             "kind": self.kind,
             "text": self.text,
             "spoken": self.spoken,
             "options": self.options,
+            "option_labels": self.option_labels,
         }
         if self.kind == "you":
             row.update(door=self.door, attachments=self.attachments)
@@ -92,6 +96,7 @@ class FeedEvent:
 class Feed:
     _events: list[FeedEvent] = field(default_factory=list)
     _next_id: int = 1
+    version: int = 0
 
     def last_id(self) -> int:
         return self._events[-1].id if self._events else 0
@@ -102,8 +107,10 @@ class Feed:
                 return item
         return None
 
-    def after(self, event_id: int) -> list[dict[str, Any]]:
-        return [item.payload() for item in self._events if item.id > event_id]
+    def after(self, event_id: int, changed_since: int | None = None) -> list[dict[str, Any]]:
+        return [item.payload() for item in self._events
+                if item.id > event_id or (changed_since is not None
+                                         and item.version > changed_since)]
 
     def _append(
         self,
@@ -117,6 +124,12 @@ class Feed:
         wall = time.time() if wall is None else wall
         spoken = spoken_part(text)
         options = feed_options(spoken=spoken, mod_options=mod_options)
+        self.version += 1
+        labels = list(mod_options or [])
+        if not labels and options:
+            labels = [m[2] for line in spoken.splitlines()
+                      if (m := re.match(r"^(\d+)\.\s+(.+)$", line.strip()))
+                      and m[1] in options]
         event = FeedEvent(
             id=self._next_id,
             time=clock(wall),
@@ -126,6 +139,8 @@ class Feed:
             spoken=spoken,
             options=options,
             wall=wall,
+            option_labels=labels,
+            version=self.version,
         )
         self._next_id += 1
         self._events.append(event)
@@ -166,6 +181,8 @@ class Feed:
         event = self.get(event_id)
         if event is None:
             return None
+        self.version += 1
+        event.version = self.version
         event.answered = number
         return event
 
