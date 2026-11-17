@@ -245,6 +245,8 @@ class Bridge:
         self._answering: set[int] = set()
         self._aimed_reply_to: int | None = None
         self._aimed_quote: str | None = None
+        self._announced: dict[str, tuple[int, bool]] = {}
+        self._contexts: dict[str, tuple[str, int, bool]] = {}
 
     def _telegram_background(self, coro: Any, log_fmt: str) -> None:
         task = asyncio.create_task(coro)
@@ -510,11 +512,68 @@ class Bridge:
         self._operator_stopped_at = time.monotonic()
         self._operator_done.set()
 
+    @staticmethod
+    def _replay_once_key(text: str) -> str:
+        text = re.sub(r"[*_`#]", "", text.casefold())
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _pop_announced(self, request_text: str) -> tuple[str, int, bool] | None:
+        req_key = self._replay_once_key(request_text)
+        entry = self._announced.pop(req_key, None)
+        if entry is not None:
+            return entry
+        best_key: str | None = None
+        for ann_key in self._announced:
+            if req_key in ann_key or ann_key in req_key:
+                if best_key is None or len(ann_key) > len(best_key):
+                    best_key = ann_key
+        if best_key is None:
+            return None
+        return self._announced.pop(best_key)
+
+    def _track_speech(self, text: str, feed_id: int | None, *, replayed: bool = False) -> None:
+        if feed_id is None:
+            return
+        while len(self._announced) >= 20:
+            self._announced.pop(next(iter(self._announced)))
+        self._announced[self._replay_once_key(text)] = (text, feed_id, replayed)
+
+    def tts_requested(self, context_id: str, text: str) -> None:
+        entry = self._pop_announced(text)
+        if entry is None:
+            return
+        self._contexts[context_id] = entry
+
+    def speech_completed(self, context_id: str) -> None:
+        self._contexts.pop(context_id, None)
+
+    def speech_interrupted(self, context_id: str) -> None:
+        entry = self._contexts.pop(context_id, None)
+        matched = entry is not None
+        replayed = bool(entry and entry[2])
+        logger.info(
+            "replay-once: interrupted context matched={} replayed_before={}",
+            "yes" if matched else "no",
+            "yes" if replayed else "no",
+        )
+        if entry is None or self._worker is None:
+            return
+        text, feed_id, replayed = entry
+        if replayed:
+            return
+        self._queue.insert(
+            0, Speech("replay", text, feed_id=feed_id, replayed=True),
+        )
+        if self._speaker is None or self._speaker.done():
+            self._speaker = asyncio.create_task(self._drain())
+
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
         self._operator_speaking = False
         self._operator_stopped_at = float("-inf")
         self._operator_done.set()
+        self._announced.clear()
+        self._contexts.clear()
         self._linked_said = None
         if self._fallback is not None:
             self._fallback.cancel()
@@ -550,6 +609,8 @@ class Bridge:
             self._operator_speaking = False
             self._operator_stopped_at = float("-inf")
             self._operator_done.set()
+            self._announced.clear()
+            self._contexts.clear()
             if self._fallback is not None:
                 self._fallback.cancel()
                 self._fallback = None
@@ -750,6 +811,7 @@ class Bridge:
             while index < len(items):
                 item = items[index]
                 if isinstance(item, Speech):
+                    self._track_speech(item.text, item.feed_id, replayed=item.replayed)
                     if not await self.say(item.text, missed=item.missed) and item.items is not None:
                         self._missed.extendleft(reversed(item.items))
                     index += 1
@@ -770,6 +832,7 @@ class Bridge:
             ))
             + (" " + item.choices() if item.choices() else "") for item in items
         )
+        self._track_speech(content, items[-1].feed_id if items else None)
         if await self.say(content):
             self._current = items[-1].session
         else:

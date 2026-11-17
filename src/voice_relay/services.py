@@ -135,6 +135,29 @@ def llm(service: Service, *, prompt: str, max_tokens: int = MAX_TOKENS) -> LLMSe
             return _compatible(service, common)
 
 
+def watch_speech(tts: TTSService, bridge: Any) -> TTSService:
+    """Hook session TTS playback into the bridge for one barge-in replay."""
+
+    @tts.event_handler("on_tts_request")
+    async def _on_tts_request(service: TTSService, context_id: str, text: str) -> None:
+        bridge.tts_requested(context_id, text)
+
+    interrupted = tts.on_audio_context_interrupted
+    completed = tts.on_audio_context_completed
+
+    async def on_audio_context_interrupted(context_id: str) -> None:
+        await interrupted(context_id)
+        bridge.speech_interrupted(context_id)
+
+    async def on_audio_context_completed(context_id: str) -> None:
+        await completed(context_id)
+        bridge.speech_completed(context_id)
+
+    tts.on_audio_context_interrupted = on_audio_context_interrupted  # type: ignore[method-assign]
+    tts.on_audio_context_completed = on_audio_context_completed  # type: ignore[method-assign]
+    return tts
+
+
 def tts(service: Service, *, speed: float) -> TTSService:
     key, model = service.key, service.model or None
     voice = service.voice or VOICES.get(service.provider)

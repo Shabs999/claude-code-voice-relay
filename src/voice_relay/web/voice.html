@@ -991,7 +991,7 @@ function show(phase) {
     connecting: ["Connecting", "", "Connecting"],
     off: ["Not connected", $("hint").textContent || "Tap to connect.", "Connect"],
     muted: ["Muted", "Tap to unmute.", "Unmute"],
-    speaking: ["Speaking", "Talk over it to interrupt.", "Mute"],
+    speaking: ["Speaking", "Talk over it to pause it; it plays again after you.", "Mute"],
     listening: ["Listening", "Tap to mute.", "Mute"],
   }[now];
   $("mic").dataset.state = now;

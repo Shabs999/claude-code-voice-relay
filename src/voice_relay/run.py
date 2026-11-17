@@ -75,7 +75,9 @@ async def bot(runner_args: RunnerArguments) -> None:
             llm,
             Preamble(),
             SpokenReply(BRIDGE),
-            services.tts(current.tts, speed=current.speed),
+            services.watch_speech(
+                services.tts(current.tts, speed=current.speed), BRIDGE,
+            ),
             transport.output(),
             assistant,
         ]
