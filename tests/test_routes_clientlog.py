@@ -30,8 +30,13 @@ async def test_client_log_auth_validation_body_and_state_boot(monkeypatch) -> No
                 "detail": "ok",
                 "page": "abc123",
                 "t": 42.7,
+                "wall": 1700000000000,
             }
             assert (await client.post("/desktop/client-log", headers=headers, json=body)).status_code == 204
+            assert "wall=1700000000000" in logs[-1]
+            assert (await client.post("/desktop/client-log", headers=headers,
+                                      json={"event": "no-wall"})).status_code == 204
+            assert "wall=None" in logs[-1]
             huge = "d" * 5000
             assert (await client.post("/desktop/client-log", headers=headers,
                                       json={"event": "test", "detail": huge})).status_code == 204
@@ -45,7 +50,7 @@ async def test_client_log_auth_validation_body_and_state_boot(monkeypatch) -> No
             assert "\n" not in event_line and "\r" not in event_line
             assert "event" + "e" * 195 in event_line
             assert "e" * 196 not in event_line
-            assert len(event_line) < 250
+            assert len(event_line) < 260
             assert (await client.post("/desktop/client-log", headers=headers,
                                       json={"event": "test", "t": "invalid"})).status_code == 204
             assert "t=None" in logs[-1]

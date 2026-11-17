@@ -362,7 +362,7 @@ async function api(path, body, headers = { "x-voice-relay": TOKEN }) {
 }
 const desktopApi = (path, body) => api(path, body, { authorization: `Bearer ${TOKEN}` });
 function note(event, reason = "", detail = "") {
-  desktopApi("/desktop/client-log", { event, reason, detail: String(detail).slice(0, 200), page: PAGE_ID, t: Math.round(performance.now()) }).catch(() => {});
+  desktopApi("/desktop/client-log", { event, reason, detail: String(detail).slice(0, 200), page: PAGE_ID, t: Math.round(performance.now()), wall: Date.now() }).catch(() => {});
 }
 const audioNoteAt = {};
 function noteAudio(kind, event, reason = "", detail = "") {
@@ -370,6 +370,125 @@ function noteAudio(kind, event, reason = "", detail = "") {
   if (audioNoteAt[kind] && now - audioNoteAt[kind] < 1000) return;
   audioNoteAt[kind] = now;
   note(event, reason, detail);
+}
+// Route-loss candidates only: these observers never control the connection or mic.
+const earsUnsupported = new Set();
+function earsNote(event, reason = "", detail = "") {
+  note(event, reason, `hidden=${document.hidden} speaking=${speaking} muted=${muted} ${detail}`);
+}
+function earsMissing(api) {
+  if (earsUnsupported.has(api)) return;
+  earsUnsupported.add(api);
+  earsNote("ears-unsupported", api);
+}
+function earsListen(target, event, handler, api) {
+  try {
+    if (!target?.addEventListener) { earsMissing(api); return false; }
+    target.addEventListener(event, handler);
+    return true;
+  } catch { earsMissing(api); return false; }
+}
+let earsDevices;
+async function earsSnapshot(event) {
+  try {
+    if (!navigator.mediaDevices?.enumerateDevices) { earsMissing("enumerateDevices"); return; }
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const snapshot = new Map(devices.map(d => [`${d.kind}:${d.deviceId}`, `${d.kind}:${d.label}|${d.deviceId.slice(0, 6)}`]));
+    if (earsDevices && JSON.stringify([...snapshot]) === JSON.stringify([...earsDevices])) return;
+    const added = [...snapshot].filter(([id]) => !earsDevices?.has(id)).map(([, value]) => value);
+    const removed = [...(earsDevices || [])].filter(([id]) => !snapshot.has(id)).map(([, value]) => value);
+    earsDevices = snapshot;
+    earsNote(event, "", `audioinput=${devices.filter(d => d.kind === "audioinput").length} audiooutput=${devices.filter(d => d.kind === "audiooutput").length} added=${added.join(",")} removed=${removed.join(",")}`);
+  } catch { earsMissing("enumerateDevices"); }
+}
+let earsMicCleanup = () => {};
+function earsMic(track) {
+  earsMicCleanup();
+  const listeners = [];
+  const report = event => {
+    try {
+      if (!track?.getSettings) { earsMissing("track.getSettings"); return; }
+      const settings = track.getSettings();
+      earsNote(`ears-mic-${event}`, "", `label=${track.label} deviceId=${(settings.deviceId || "").slice(0, 6)} readyState=${track.readyState} echoCancellation=${settings.echoCancellation}`);
+    } catch { earsMissing("track.getSettings"); }
+  };
+  for (const event of ["mute", "unmute", "ended"]) {
+    const handler = () => report(event);
+    if (earsListen(track, event, handler, "mic-track-events")) listeners.push([event, handler]);
+  }
+  earsMicCleanup = () => {
+    for (const [event, handler] of listeners) track.removeEventListener(event, handler);
+    earsMicCleanup = () => {};
+  };
+  report("settings");
+}
+let earsOutCleanup = () => {};
+function earsOutTrack(track) {
+  earsOutCleanup();
+  const listeners = [];
+  for (const event of ["mute", "unmute", "ended"]) {
+    const handler = () => earsNote(`ears-out-track-${event}`, "", `readyState=${track.readyState} trackMuted=${track.muted}`);
+    if (earsListen(track, event, handler, "remote-track-events")) listeners.push([event, handler]);
+  }
+  earsOutCleanup = () => {
+    for (const [event, handler] of listeners) track.removeEventListener(event, handler);
+    earsOutCleanup = () => {};
+  };
+}
+const earsAudioDetail = () => `paused=${audio.paused} readyState=${audio.readyState} networkState=${audio.networkState} volume=${audio.volume} elMuted=${audio.muted}`;
+for (const event of ["pause", "play", "playing", "ended", "suspend", "stalled", "waiting", "volumechange"]) {
+  earsListen(audio, event, () => earsNote(`ears-audio-${event}`, "", earsAudioDetail()), "audio-events");
+}
+let earsAudioTimer = null, earsAudioLast;
+function earsStopAudioPoll() { clearInterval(earsAudioTimer); earsAudioTimer = null; }
+function earsStartAudioPoll() {
+  earsStopAudioPoll();
+  earsAudioTimer = setInterval(() => {
+    if (!speaking) return;
+    const value = `${audio.paused}|${audio.readyState}|${audio.networkState}`;
+    if (value === earsAudioLast) return;
+    earsAudioLast = value;
+    earsNote("ears-audio-poll", "", earsAudioDetail());
+  }, 1000);
+}
+let earsMediaState;
+function earsMediaStateChange(value) {
+  try {
+    if (!navigator.mediaSession) { earsMissing("mediaSession"); return; }
+    navigator.mediaSession.playbackState = value;
+    if (earsMediaState === navigator.mediaSession.playbackState) return;
+    earsMediaState = navigator.mediaSession.playbackState;
+    earsNote("ears-mediasession-state", "", `state=${earsMediaState}`);
+  } catch { earsMissing("mediaSession.playbackState"); }
+}
+function earsSetup() {
+  earsListen(navigator.mediaDevices, "devicechange", () => void earsSnapshot("ears-devicechange"), "devicechange");
+  void earsSnapshot("ears-devices");
+  for (const action of ["pause", "play", "stop"]) {
+    try {
+      if (!navigator.mediaSession?.setActionHandler) { earsMissing("mediaSession"); break; }
+      navigator.mediaSession.setActionHandler(action, () => {
+        earsNote(`ears-mediasession-${action}`);
+        if (action === "pause") audio.pause();
+        if (action === "play") ensureAudioPlaying("mediasession");
+      });
+    } catch { earsMissing(`mediaSession.${action}`); }
+  }
+  try {
+    if (!navigator.audioSession) { earsMissing("audioSession"); return; }
+    let last;
+    const report = () => {
+      try {
+        const detail = `type=${navigator.audioSession.type} state=${navigator.audioSession.state}`;
+        if (detail === last) return;
+        last = detail;
+        earsNote("ears-session", "", detail);
+      } catch { earsMissing("audioSession.state"); }
+    };
+    earsListen(navigator.audioSession, "statechange", report, "audioSession.statechange");
+    report();
+    setInterval(report, 1000);
+  } catch { earsMissing("audioSession"); }
 }
 function ensureAudioPlaying(reason) {
   if (!audio.srcObject) return;
@@ -722,6 +841,7 @@ function setAudioSession(type) {
 
 let micGeneration = 0;
 async function releaseMic() {
+  earsMicCleanup();
   note("mic-released");
   micGeneration++;  // cancels any takeMic() still waiting for the phone
   if (!client || !transport) return;
@@ -756,6 +876,7 @@ async function takeMic() {
     if (generation !== micGeneration || document.hidden) { stream.getTracks().forEach(t => t.stop()); return false; }  // the newer request or the mute that cancelled us owns the audio mode
     localMicStream = stream;
     await sender.replaceTrack(stream.getAudioTracks()[0]);
+    earsMic(stream.getAudioTracks()[0]);
     setAudioSession("play-and-record");
     client.enableMic(true);
     note("mic-taken", "", stream.getAudioTracks()[0]?.label || "");
@@ -805,6 +926,7 @@ async function openConnection(replace, reason) {
     callbacks: {
       onTrackStarted(track, participant) {
         if (participant?.local || track.kind !== "audio") return;
+        earsOutTrack(track);
         audio.srcObject = new MediaStream([track]);
         ensureAudioPlaying("track");
       },
@@ -814,15 +936,20 @@ async function openConnection(replace, reason) {
       },
       onBotStartedSpeaking() {
         speaking = true;
+        earsStartAudioPoll();
+        earsMediaStateChange("playing");
         const session = navigator.audioSession?.type ?? "none";
         noteAudio("speech-arrived", "speech-arrived", "",
           `paused=${audio.paused} muted=${audio.muted} volume=${audio.volume} session=${session}`);
         ensureAudioPlaying("speech-arrived");
         show();
       },
-      onBotStoppedSpeaking() { speaking = false; replayingId = null; show(); renderFeed(); },
+      onBotStoppedSpeaking() { speaking = false; earsStopAudioPoll(); earsMediaStateChange("paused"); replayingId = null; show(); renderFeed(); },
       onDisconnected() {
         if (client !== attempt) return;
+        earsStopAudioPoll();
+        earsOutCleanup();
+        earsMicCleanup();
         note("disconnected", reason);
         client = null; transport = null; localMicStream = null; connected = false; speaking = false;
         replayingId = null;
@@ -1426,6 +1553,7 @@ $("compose-quote-clear").addEventListener("click", async () => {
 });
 
 $("mic").addEventListener("click", async () => {
+  ensureSoundCtx();
   if (!connected) { $("hint").textContent = ""; await connect(false, "tap"); return; }
   if (!muted) await muteHere();
   else {
@@ -1436,9 +1564,19 @@ $("mic").addEventListener("click", async () => {
   }
 });
 let soundCtx;
+function ensureSoundCtx() {
+  try {
+    if (soundCtx) return soundCtx;
+    if (typeof AudioContext === "undefined") { earsMissing("AudioContext"); return; }
+    soundCtx ??= new AudioContext();
+    earsListen(soundCtx, "statechange", () => earsNote("ears-ctx-state", "", `state=${soundCtx.state}`), "AudioContext.statechange");
+    earsNote("ears-ctx-state", "init", `state=${soundCtx.state}`);
+    return soundCtx;
+  } catch { earsMissing("AudioContext"); }
+}
 function playChime() {
   try {
-    soundCtx ??= new AudioContext();
+    ensureSoundCtx();
     const now = soundCtx.currentTime, dur = 0.12;
     for (const [freq, at] of [[880, 0], [1320, dur]]) {
       const osc = soundCtx.createOscillator(), gain = soundCtx.createGain();
@@ -1485,6 +1623,7 @@ for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () =>
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 
 note("page-load");
+earsSetup();
 setAudioSession("playback");
 note("audio-session-api", navigator.audioSession ? "yes" : "no");
 await Promise.all(["wa-button"].map(tag => customElements.whenDefined(tag)));

@@ -316,7 +316,11 @@ def mount(
         t = body.get("t")
         if not isinstance(t, (int, float)) or isinstance(t, bool):
             t = None
-        logger.info("voice-page {} {} reason={} t={} {}", page, event, reason, t, detail)
+        wall = body.get("wall")
+        if not isinstance(wall, (int, float)) or isinstance(wall, bool):
+            wall = None
+        logger.info("voice-page {} {} reason={} t={} wall={} {}",
+                    page, event, reason, t, wall, detail)
         return Response(status_code=204)
 
     @app.post("/desktop/mute")
