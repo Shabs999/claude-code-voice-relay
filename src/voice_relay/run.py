@@ -40,6 +40,8 @@ async def bot(runner_args: RunnerArguments) -> None:
         current = replace(current, speed=min(current.speed, 1.2))
     BRIDGE.tts_provider = current.tts.provider
     BRIDGE.quiet_seconds = current.quiet_minutes * 60
+    if not BRIDGE._operator_pause_set:
+        BRIDGE.operator_pause = current.operator_pause
     params = {"webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True)}
     transport = await create_transport(runner_args, params)
     llm = services.llm(current.llm, prompt=current.prompt)
@@ -55,6 +57,14 @@ async def bot(runner_args: RunnerArguments) -> None:
     @user.event_handler("on_user_turn_message_added")
     async def _operator_said(aggregator, message) -> None:
         BRIDGE.operator_said(message.content)
+
+    @user.event_handler("on_user_turn_started")
+    async def _operator_turn_started(aggregator, strategy) -> None:
+        BRIDGE.operator_started()
+
+    @user.event_handler("on_user_turn_stopped")
+    async def _operator_turn_stopped(aggregator, strategy, message) -> None:
+        BRIDGE.operator_stopped()
 
     pipeline = Pipeline(
         [

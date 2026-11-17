@@ -90,6 +90,7 @@ FIELDS = (
     "VOICE_RELAY_QUIET_MINUTES",
     "VOICE_RELAY_IDLE_SECONDS",
     "VOICE_RELAY_CATCHUP_SECONDS",
+    "VOICE_RELAY_OPERATOR_PAUSE",
 )
 SECRETS = (*KEYS.values(), "VOICE_RELAY_STT_KEY", "VOICE_RELAY_LLM_KEY", "VOICE_RELAY_TTS_KEY")
 SERVERS = (SERVER, *APPS)  # their key comes from VOICE_RELAY_<STAGE>_KEY
@@ -124,6 +125,7 @@ class Settings:
     quiet_minutes: float
     narration_seconds: float
     speed: float
+    operator_pause: float
 
 
 def environment() -> dict[str, str]:
@@ -144,6 +146,7 @@ def load(env: Mapping[str, str] | None = None) -> Settings:
         quiet_minutes=_number(env, "VOICE_RELAY_QUIET_MINUTES", 15.0, 0.0, 240.0),
         narration_seconds=_number(env, "VOICE_RELAY_NARRATION_SECONDS", 30.0, 10.0, 300.0),
         speed=_number(env, "VOICE_RELAY_TTS_SPEED", 1.0, 0.7, 2.0),  # OpenAI accepts up to 4.0; 2.0 is our ceiling
+        operator_pause=_number(env, "VOICE_RELAY_OPERATOR_PAUSE", 4.0, 0.0, 15.0),
     )
 
 

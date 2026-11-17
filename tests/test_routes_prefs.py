@@ -34,7 +34,9 @@ async def test_prefs_authorization_validation_state_and_live_frame(monkeypatch) 
                         {"speed": True, "voice": "ash"}, {}, {"speed": 1.5, "voice": []}):
             assert (await client.post("/desktop/prefs", headers=headers, json=invalid)).status_code == 400
         assert (await client.post("/desktop/prefs", headers=headers, json=body)).status_code == 204
-        assert (await client.get("/desktop/state", headers=headers)).json()["prefs"] == body
+        assert (await client.get("/desktop/state", headers=headers)).json()["prefs"] == {
+            **body, "pause": 4.0,
+        }
         assert len(frames) == 1 and frames[0].settings == body
         bridge.tts_provider = "kokoro"
         await client.post("/desktop/prefs", headers=headers, json=body)

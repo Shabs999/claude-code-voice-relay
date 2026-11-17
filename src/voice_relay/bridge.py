@@ -116,7 +116,13 @@ RESUME_UPDATES = FunctionSchema(
     name="resume_updates", description="Release held updates in one catch-up.",
     properties={}, required=[],
 )
-TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION, HOLD_UPDATES, RESUME_UPDATES)
+SET_PAUSE = FunctionSchema(
+    name="set_pause",
+    description="Set how many seconds to wait after the operator stops before session speech.",
+    properties={"seconds": {"type": "number", "description": "Seconds from 0 to 15"}},
+    required=[],
+)
+TOOLS = (SEND_TASK, ABORT_TURN, OPEN_SESSION, HOLD_UPDATES, RESUME_UPDATES, SET_PAUSE)
 
 
 def split_answer(text: str) -> tuple[str, str]:
@@ -226,6 +232,12 @@ class Bridge:
         self._fallback: asyncio.Task[None] | None = None
         self._quiet = asyncio.Event()
         self._quiet.set()
+        self._operator_speaking = False
+        self._operator_stopped_at = float("-inf")
+        self._operator_done = asyncio.Event()
+        self._operator_done.set()
+        self.operator_pause = 4.0
+        self._operator_pause_set = False
         self._notices: set[asyncio.Task[bool]] = set()
         self._background: set[asyncio.Task[None]] = set()
         self._telegram: Any = None
@@ -353,6 +365,22 @@ class Bridge:
         self._gag = True
         await params.result_callback(message + " Say nothing.")
 
+    async def _set_pause(self, params: FunctionCallParams) -> None:
+        seconds = params.arguments.get("seconds")
+        if seconds is None:
+            await params.result_callback("not set: seconds is required")
+            return
+        if type(seconds) not in (int, float) or not 0 <= seconds <= 15:
+            await params.result_callback("not set: seconds must be a number from 0 to 15")
+            return
+        self.operator_pause = float(seconds)
+        self._operator_pause_set = True
+        label = f"{int(seconds):g}" if seconds == int(seconds) else f"{seconds:g}"
+        message = f"I'll wait {label} seconds after you stop."
+        await self.say(message)
+        self._gag = True
+        await params.result_callback(message + " Say nothing.")
+
     def operator_said(self, text: str, *, typed: bool = False) -> None:
         if not text.strip():
             return
@@ -471,9 +499,22 @@ class Bridge:
         llm.register_function(OPEN_SESSION.name, self._open_session)
         llm.register_function(HOLD_UPDATES.name, self._hold_updates)
         llm.register_function(RESUME_UPDATES.name, self._resume_updates)
+        llm.register_function(SET_PAUSE.name, self._set_pause)
+
+    def operator_started(self) -> None:
+        self._operator_speaking = True
+        self._operator_done.clear()
+
+    def operator_stopped(self) -> None:
+        self._operator_speaking = False
+        self._operator_stopped_at = time.monotonic()
+        self._operator_done.set()
 
     def attach(self, worker: PipelineWorker) -> None:
         self._worker = worker
+        self._operator_speaking = False
+        self._operator_stopped_at = float("-inf")
+        self._operator_done.set()
         self._linked_said = None
         if self._fallback is not None:
             self._fallback.cancel()
@@ -506,6 +547,9 @@ class Bridge:
         if self._worker is worker:
             self._worker = None
             self._quiet.set()
+            self._operator_speaking = False
+            self._operator_stopped_at = float("-inf")
+            self._operator_done.set()
             if self._fallback is not None:
                 self._fallback.cancel()
                 self._fallback = None
@@ -1062,7 +1106,16 @@ class Bridge:
         while True:
             await self._quiet.wait()
             await asyncio.sleep(max(QUIET_SECONDS, self._asked + REPLY_SECONDS - time.monotonic()))
-            if self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS:
+            if not self._quiet.is_set() or time.monotonic() - self._asked < REPLY_SECONDS:
+                continue
+            if self._operator_speaking:
+                await self._operator_done.wait()
+            remaining = self.operator_pause - (time.monotonic() - self._operator_stopped_at)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            if (self._quiet.is_set() and time.monotonic() - self._asked >= REPLY_SECONDS
+                    and not self._operator_speaking
+                    and time.monotonic() - self._operator_stopped_at >= self.operator_pause):
                 break
 
     def _schedule_linked(self) -> None:

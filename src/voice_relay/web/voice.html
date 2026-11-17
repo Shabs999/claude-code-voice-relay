@@ -268,7 +268,7 @@ body.talking main { padding-bottom: 0; }
           <div class="hint" id="hint"></div>
         </div>
         <div class="talk-end">
-          <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button><button class="chip" id="reload" aria-label="Reload page" title="Reload page" onclick="location.reload()">↻</button></div>
+          <div class="prefs"><button class="chip" id="speed" aria-label="Speech speed"></button><button class="chip" id="voice" aria-label="Voice"></button><button class="chip" id="pause" aria-label="Pause before it speaks"></button><button class="chip" id="reload" aria-label="Reload page" title="Reload page" onclick="location.reload()">↻</button></div>
         </div>
       </div>
       <div class="sound-row"><wa-button id="sound" class="hidden" size="s" variant="brand" appearance="outlined">Allow sound</wa-button></div>
@@ -330,16 +330,20 @@ let replayingId = null, feedReplayBusy = new Set();
 const FEED_REPLAY_KINDS = new Set(["answer", "waiting", "update"]);
 const speeds = [1, 1.25, 1.5, 1.75, 2];
 const voices = ["alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse"];
-let speed = 1.5, voice = "ash";
+const pauses = [1, 2, 3, 4, 5, 6, 8, 10];
+let speed = 1.5, voice = "ash", pause = 4;
 try {
   const savedSpeed = Number(localStorage.getItem("voice-relay.speed"));
   const savedVoice = localStorage.getItem("voice-relay.voice");
+  const savedPause = Number(localStorage.getItem("voice-relay.pause"));
   if (speeds.includes(savedSpeed)) speed = savedSpeed;
   if (voices.includes(savedVoice)) voice = savedVoice;
+  if (pauses.includes(savedPause)) pause = savedPause;
 } catch { /* storage can be disabled */ }
 function renderPrefs() {
   $("speed").textContent = `${speed.toFixed(2).replace(/0$/, "")}×`;
   $("voice").textContent = voice;
+  $("pause").textContent = `${pause} s`;
 }
 renderPrefs();
 let config;  // the settings version of the running connection
@@ -959,7 +963,7 @@ async function openConnection(replace, reason) {
   });
   client = attempt;
   try {
-    await desktopApi("/desktop/prefs", { speed, voice });
+    await desktopApi("/desktop/prefs", { speed, voice, pause });
     await attempt.connect({ webrtcRequestParams: { endpoint: "/api/offer" } });
     if (client !== attempt) return;
     connected = true; retryStep = 0;
@@ -1610,15 +1614,17 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) { if (connected && !muted) void muteHere(); }
   else onPageReturn("visible");
 });
-for (const id of ["speed", "voice"]) $(id).addEventListener("click", async () => {
+for (const id of ["speed", "voice", "pause"]) $(id).addEventListener("click", async () => {
   if (id === "speed") speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length];
-  else voice = voices[(voices.indexOf(voice) + 1) % voices.length];
+  else if (id === "voice") voice = voices[(voices.indexOf(voice) + 1) % voices.length];
+  else pause = pauses[(pauses.indexOf(pause) + 1) % pauses.length];
   renderPrefs();
   try {
     localStorage.setItem("voice-relay.speed", String(speed));
     localStorage.setItem("voice-relay.voice", voice);
+    localStorage.setItem("voice-relay.pause", String(pause));
   } catch { /* storage can be disabled */ }
-  await desktopApi("/desktop/prefs", { speed, voice }).catch(() => {});
+  await desktopApi("/desktop/prefs", { speed, voice, pause }).catch(() => {});
 });
 if (new URLSearchParams(location.search).has("window") && outerWidth > 600) resizeTo(460, 860);
 

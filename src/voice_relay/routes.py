@@ -268,7 +268,11 @@ def mount(
                 "held": bridge.held(),
                 "held_until": (time.time() + bridge._hold_until - time.monotonic()
                                if bridge._hold_until not in (None, float("inf")) else None),
-                "prefs": {"speed": prefs.speed, "voice": prefs.voice},
+                "prefs": {
+                    "speed": prefs.speed,
+                    "voice": prefs.voice,
+                    "pause": bridge.operator_pause,
+                },
                 "sessions": bridge.state(),
                 "aimed": bridge.aimed_state(),
                 "feed_last": bridge.feed.last_id(),
@@ -525,6 +529,12 @@ def mount(
             raise HTTPException(400, "speed: expected a number from 1.0 to 2.0")
         if voice not in VOICES:
             raise HTTPException(400, "voice: expected an OpenAI voice")
+        pause = body.get("pause")
+        if pause is not None:
+            if type(pause) not in (int, float) or not 0 <= pause <= 15:
+                raise HTTPException(400, "pause: expected a number from 0 to 15")
+            bridge.operator_pause = float(pause)
+            bridge._operator_pause_set = True
         prefs.speed, prefs.voice = float(speed), voice
         await bridge.update_prefs(prefs.speed, voice)
         return Response(status_code=204)
