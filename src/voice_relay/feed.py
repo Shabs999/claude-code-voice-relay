@@ -168,11 +168,13 @@ class Feed:
         event.options = []
         event.attachments = [Path(path).name for path in attachments]
 
-    def record_answer(self, session: Session, text: str, *, wall: float | None = None) -> None:
-        self._append(session=session.name, kind="answer", text=text, wall=wall)
+    def record_answer(self, session: Session, text: str, *, wall: float | None = None) -> FeedEvent:
+        return self._append(session=session.name, kind="answer", text=text, wall=wall)
 
-    def record_waiting(self, session: Session, action: str, *, wall: float | None = None) -> None:
-        self._append(session=session.name, kind="waiting", text=action, wall=wall)
+    def record_waiting(
+        self, session: Session, action: str, *, wall: float | None = None,
+    ) -> FeedEvent:
+        return self._append(session=session.name, kind="waiting", text=action, wall=wall)
 
     def record_update(
         self,
@@ -181,8 +183,8 @@ class Feed:
         options: list[str] | None,
         *,
         wall: float | None = None,
-    ) -> None:
-        self._append(
+    ) -> FeedEvent:
+        return self._append(
             session=session.name,
             kind="update",
             text=text,

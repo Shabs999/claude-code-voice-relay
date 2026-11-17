@@ -69,7 +69,7 @@ async def test_duplicates_and_pending_replacement(bridge: Bridge) -> None:
     await bridge.update(session, "needs-you", "first question", None, False)
     await bridge.update(session, "needs-you", "second question", None, False)
     await bridge.update(session, "done", "finished", None, False)
-    assert [item.text for item in bridge._updates] == [
+    assert [item.text for item in bridge._queue] == [
         "new", "first question", "second question", "finished"
     ]
     assert bridge.state()[0]["queued_updates"] == 4
@@ -142,7 +142,7 @@ async def test_duplicate_window_and_original_outcome(
     worker = Worker()
     bridge.attach(worker)  # type: ignore[arg-type]
     assert await bridge.update(session, "done", "same", None, False) == "queued"
-    assert not bridge._updates
+    assert not bridge._queue
     now[0] += 601
     assert await bridge.update(session, "done", "same", None, False) == "spoken"
     await bridge._speaker
@@ -268,12 +268,13 @@ async def test_live_answer_supersedes_unspoken_updates(bridge: Bridge) -> None:
     session.asked_at = 1
     assert await bridge.answer(session, "finished answer")
     assert session.asked_at is None
-    assert [item.kind for item in bridge._updates] == ["needs-you"]
-    assert "finished answer" in content(worker)
+    assert [item.kind for item in bridge._queue] == ["needs-you", "answer"]
+    assert len(worker.frames) == 1 and not worker.frames[0].run_llm
     bridge._quiet.set()
     await bridge._speaker
     assert len(worker.frames) == 3
-    message = worker.frames[2].text
+    assert worker.frames[2].text == "shop: finished answer"
+    message = worker.frames[1].text
     assert "keep question" in message
     assert "old done" not in message and "old milestone" not in message
 

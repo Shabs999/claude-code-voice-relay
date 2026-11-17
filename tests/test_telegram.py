@@ -406,8 +406,12 @@ async def test_colon_session_choices(monkeypatch, tmp_path) -> None:
 
 @pytest.mark.parametrize("failure", ["sendMessage", "editMessageReplyMarkup", "hook"])
 async def test_telegram_failure_preserves_voice(monkeypatch, tmp_path, failure) -> None:
+    from test_bridge import Worker
+    from test_bridge import spoken as drain_spoken
+
     door, bridge, api = _door(monkeypatch, tmp_path)
     await _link(bridge)
+    bridge._worker = Worker()
     spoken = []
 
     async def say(text, **kwargs):
@@ -435,9 +439,11 @@ async def test_telegram_failure_preserves_voice(monkeypatch, tmp_path, failure) 
             await api.call("editMessageReplyMarkup")
         monkeypatch.setattr(door, "on_answer", edit_hook)
     assert await bridge.answer(bridge.sessions["sid"], "Which one?\n1. alpha\n2. beta")
+    await drain_spoken(bridge)
     await bridge.drain_background()
     assert "alpha" in spoken[-1]
     assert await bridge.waiting(bridge.sessions["sid"], "approve")
+    await drain_spoken(bridge)
     await bridge.drain_background()
     assert "approve" in spoken[-1]
 
@@ -1008,8 +1014,12 @@ async def test_send_failure_queues_dnd_say_still_runs(monkeypatch, tmp_path) -> 
     import httpx
     from loguru import logger
 
+    from test_bridge import Worker
+    from test_bridge import spoken as drain_spoken
+
     door, bridge, api = _door(monkeypatch, tmp_path)
     await _link(bridge)
+    bridge._worker = Worker()
     spoken: list[str] = []
     log: list[str] = []
     handler_id = logger.add(lambda m: log.append(m.record["message"]))
@@ -1034,6 +1044,7 @@ async def test_send_failure_queues_dnd_say_still_runs(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(api, "call", fail_twice)
     try:
         await bridge.answer(bridge.sessions["sid"], "Hello there")
+        await drain_spoken(bridge)
         await bridge.drain_background()
     finally:
         logger.remove(handler_id)

@@ -159,6 +159,7 @@ class Update:
     subagent: bool
     at: float
     wall: float
+    feed_id: int | None = None
 
     def words(self) -> str:
         helper = " (a helper inside that session)" if self.subagent else ""
@@ -172,6 +173,16 @@ class Update:
             f"Option {numbers[i]}: {text.rstrip('.')}."
             for i, text in enumerate(self.options)
         )
+
+
+@dataclass(frozen=True)
+class Speech:
+    kind: str
+    text: str
+    missed: tuple[str, str, str] | None = None
+    feed_id: int | None = None
+    replayed: bool = False
+    items: deque | None = None
 
 
 class Bridge:
@@ -207,7 +218,7 @@ class Bridge:
         self.tts_provider = ""
         self._hold_until: float | None = None
         self._hold_timer: asyncio.Task | None = None
-        self._updates: list[Update] = []
+        self._queue: list[Update | Speech] = []
         self._speaker: asyncio.Task[None] | None = None
         self._update_seen: list[tuple[Update, str]] = []
         self._latest: dict[str, tuple[str, float]] = {}
@@ -268,9 +279,17 @@ class Bridge:
         if self._hold_timer is not None:
             self._hold_timer.cancel()
         self._hold_until = time.monotonic() + minutes * 60 if minutes else float("inf")
-        for item in self._updates:
-            self._remember_update(item)
-        self._updates = []
+        kept: list[Update | Speech] = []
+        for item in self._queue:
+            if isinstance(item, Update):
+                self._remember_update(item)
+            elif isinstance(item, Speech) and item.kind == "replay":
+                kept.append(item)
+            elif item.missed is not None:
+                self._remember(*item.missed)
+            elif item.items is not None:
+                self._missed.extendleft(reversed(item.items))
+        self._queue = kept
         pending = {item[0] for item in self._missed}
         self._update_seen = [
             (item, "held" if item.at in pending else outcome)
@@ -296,9 +315,10 @@ class Bridge:
         return items
 
     async def _deliver_catchup(self, items: deque) -> bool:
-        if not await self.say(self._briefing(items)):
+        if self._worker is None:
             self._missed.extendleft(reversed(items))
             return False
+        self._enqueue(Speech("catchup", self._briefing(items), items=items))
         return True
 
     async def release(self) -> bool:
@@ -521,7 +541,8 @@ class Bridge:
         return [
             {"name": session.name, "running": session.running, "waiting": session.waiting,
              "pending_lines": session.record.pending_lines,
-             "queued_updates": sum(item.session is session for item in self._updates)
+             "queued_updates": sum(isinstance(item, Update) and item.session is session
+                                   for item in self._queue)
              + sum(k.startswith("update-") and name == session.name
                    for _, k, name, _, _ in self._missed)}
             for session in self.sessions.all()
@@ -568,7 +589,10 @@ class Bridge:
             self._aimed = None
             self._aimed_reply_to = None
             self._aimed_quote = None
-        self._updates = [item for item in self._updates if item.session is not session]
+        self._queue = [
+            item for item in self._queue
+            if not isinstance(item, Update) or item.session is not session
+        ]
         self._update_seen = [
             (item, outcome) for item, outcome in self._update_seen
             if item.session is not session
@@ -632,7 +656,9 @@ class Bridge:
                 or (subagent and old.subagent)
             )
 
-        self._updates = [old for old in self._updates if not replaces(old)]
+        self._queue = [
+            old for old in self._queue if not isinstance(old, Update) or not replaces(old)
+        ]
         replaced = {old.at for old, _ in self._update_seen if replaces(old)}
         self._missed = deque(
             (old for old in self._missed
@@ -644,10 +670,8 @@ class Bridge:
         if self._worker is None or held:
             self._remember_update(item)
         else:
-            self._updates.append(item)
-            if self._speaker is None or self._speaker.done():
-                self._speaker = asyncio.create_task(self._speak_updates())
-        self.feed.record_update(session, text, options, wall=item.wall)
+            self._enqueue(item)
+        item.feed_id = self.feed.record_update(session, text, options, wall=item.wall).id
         if self._telegram is not None:
             self._telegram_background(
                 self._telegram.on_update(session, kind, text, options),
@@ -660,26 +684,53 @@ class Bridge:
                        "\n".join(filter(None, (item.words(), item.choices()))),
                        at=item.at, wall=item.wall)
 
-    async def _speak_updates(self) -> None:
-        while self._updates:
+    def _enqueue(self, item: Update | Speech) -> None:
+        self._queue.append(item)
+        if self._speaker is None or self._speaker.done():
+            self._speaker = asyncio.create_task(self._drain())
+
+    async def _drain(self) -> None:
+        while self._queue:
             await self._wait_quiet()
             if self.held():
+                remaining: list[Update | Speech] = []
+                for item in self._queue:
+                    if isinstance(item, Speech) and item.kind == "replay":
+                        await self.say(item.text, missed=item.missed)
+                    else:
+                        remaining.append(item)
+                self._queue = remaining
                 return
-            items, self._updates = self._updates, []
-            if len(items) >= 3:
-                order = {"needs-you": 0, "milestone": 1, "done": 2}
-                items.sort(key=lambda item: (order[item.kind], item.at))
-            content = " ".join(
-                self._named(item.session, item.words() + (
-                    "." if len(items) > 1 and not item.words().endswith((".", "?", "!")) else ""
-                ))
-                + (" " + item.choices() if item.choices() else "") for item in items
-            )
-            if await self.say(content):
-                self._current = items[-1].session
-            else:
-                for item in items:
-                    self._remember_update(item)
+            items, self._queue = self._queue, []
+            index = 0
+            while index < len(items):
+                item = items[index]
+                if isinstance(item, Speech):
+                    if not await self.say(item.text, missed=item.missed) and item.items is not None:
+                        self._missed.extendleft(reversed(item.items))
+                    index += 1
+                else:
+                    updates = []
+                    while index < len(items) and isinstance(items[index], Update):
+                        updates.append(items[index])
+                        index += 1
+                    await self._say_updates(updates)
+
+    async def _say_updates(self, items: list[Update]) -> None:
+        if len(items) >= 3:
+            order = {"needs-you": 0, "milestone": 1, "done": 2}
+            items.sort(key=lambda item: (order[item.kind], item.at))
+        content = " ".join(
+            self._named(item.session, item.words() + (
+                "." if len(items) > 1 and not item.words().endswith((".", "?", "!")) else ""
+            ))
+            + (" " + item.choices() if item.choices() else "") for item in items
+        )
+        if await self.say(content):
+            self._current = items[-1].session
+        else:
+            for item in items:
+                self._remember_update(item)
 
     async def history(self, session: Session, text: str) -> bool:
         return await self._append(HISTORY.format(name=session.name, history=text))
@@ -708,11 +759,12 @@ class Bridge:
                 and item[1] in {"progress", "waiting", "update-milestone", "update-done"}
             )), maxlen=500,
         )
-        self._updates = [
-            item for item in self._updates
-            if not (item.session is session and item.kind in {"milestone", "done"})
+        self._queue = [
+            item for item in self._queue
+            if not (isinstance(item, Update) and item.session is session
+                    and item.kind in {"milestone", "done"})
         ]
-        self.feed.record_answer(session, text)
+        event = self.feed.record_answer(session, text)
         if self._telegram is not None:
             self._telegram_background(
                 self._telegram.on_answer(session, text, origin=origin, waiting=was_waiting),
@@ -728,14 +780,17 @@ class Bridge:
         if self.held():
             self._remember("answer", session.name, spoken)
             return False
-        return await self.say(
-            self._named(session, spoken), missed=("answer", session.name, spoken)
-        )
+        if self._worker is None:
+            self._remember("answer", session.name, spoken)
+            return False
+        self._enqueue(Speech("answer", self._named(session, spoken),
+                             missed=("answer", session.name, spoken), feed_id=event.id))
+        return True
 
     async def waiting(self, session: Session, action: str) -> bool:
         session.waiting = True
         session.asked_at = None
-        self.feed.record_waiting(session, action)
+        event = self.feed.record_waiting(session, action)
         if self._telegram is not None:
             self._telegram_background(
                 self._telegram.on_waiting(session, action),
@@ -746,10 +801,14 @@ class Bridge:
             return False
         if await self._append(WAITING.format(name=session.name, action=action)):
             self._current = session
-        return await self.say(
-            f"{session.name} waits for your OK at the screen to {action}.",
-            missed=("waiting", session.name, action),
-        )
+        if self._worker is None:
+            self._remember("waiting", session.name, action)
+            return False
+        self._enqueue(Speech(
+            "waiting", f"{session.name} waits for your OK at the screen to {action}.",
+            missed=("waiting", session.name, action), feed_id=event.id,
+        ))
+        return True
 
     def _resolve_session(self, name: str, text: str = "") -> Session | str:
         found = self.sessions.find(name)
@@ -833,13 +892,7 @@ class Bridge:
             return "busy"
         text = replay_text(event, multi=len(self.sessions.all()) > 1)
         self._pending_replay_until = time.monotonic() + 30
-        try:
-            if not await self.say(text):
-                self._pending_replay_until = 0.0
-                return "not connected"
-        except BaseException:
-            self._pending_replay_until = 0.0
-            raise
+        self._enqueue(Speech("replay", text, feed_id=event_id))
         return None
 
     async def send_feed_option(self, event_id: int, number: str) -> str | None:

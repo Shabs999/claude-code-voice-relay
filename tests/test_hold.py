@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from test_bridge import spoken
 from voice_relay import bridge as module
 from voice_relay import routes, settings
 from voice_relay.bridge import Bridge
@@ -55,6 +56,7 @@ async def test_full_hold_one_briefing(bridge, monkeypatch, timer):
     else:
         assert await bridge.release()
     assert not bridge.held()
+    await spoken(bridge)
     assert len(worker.frames) == 1
     text = worker.frames[0].text
     words = ["choose branch", "brief answer"]
@@ -153,6 +155,7 @@ async def test_expiry_and_replacement_timer(bridge, monkeypatch):
     assert not bridge.held()
     assert not bridge.held()
     await asyncio.sleep(0)
+    await spoken(bridge)
     assert len(worker.frames) == 1
     assert not await bridge.release()
 
@@ -177,4 +180,5 @@ async def test_hold_blocks_pending_speaker_and_fallback(bridge, monkeypatch):
     assert not worker.frames and not session.reminded
     fallback.cancel()
     await bridge.release()
+    await spoken(bridge)
     assert len(worker.frames) == 1

@@ -10,7 +10,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 
-from test_bridge import Call, Worker
+from test_bridge import Call, Worker, spoken
 from voice_relay.bridge import Bridge
 from voice_relay.processors import Preamble, SpokenReply
 
@@ -24,6 +24,7 @@ async def test_answer_speaks_only_brief_and_keeps_detail(second):
     worker = Worker()
     bridge._worker = worker
     await bridge.answer(session, "Done.\n---\n" + "Detail. " * 100)
+    await spoken(bridge)
     speech = [f for f in worker.frames if isinstance(f, TTSSpeakFrame)]
     assert len(speech) == 1
     assert speech[0].text == ("shop: Done." if second else "Done.")

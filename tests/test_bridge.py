@@ -55,6 +55,11 @@ async def voiced(*names: str) -> tuple[Bridge, Worker]:
     return bridge, worker
 
 
+async def spoken(bridge):
+    if bridge._speaker:
+        await bridge._speaker
+
+
 def _linked_speaks(frames: list[Any]) -> list[TTSSpeakFrame]:
     prefix = LINKED.split("{")[0]
     return [frame for frame in frames if isinstance(frame, TTSSpeakFrame) and frame.text.startswith(prefix)]
@@ -140,7 +145,7 @@ async def test_an_answer_leaves_latest_progress_silent() -> None:
     bridge.progress(bridge.sessions["shop"], "runs make lint")
     bridge.progress(bridge.sessions["api"], "reads the log")
     assert await bridge.answer(bridge.sessions["shop"], "done")
-    await asyncio.sleep(0)
+    await spoken(bridge)
     context, answer = worker.frames
     assert not context.run_llm
     assert answer.text == "shop: done"
@@ -499,8 +504,9 @@ def test_missed_updates_default_window(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_answer_detail_is_only_in_detail_block() -> None:
     bridge, worker = await voiced("shop")
     assert await bridge.answer(bridge.sessions["shop"], "Done.\n---\nPrivate detail.")
-    frame, spoken = worker.frames
-    assert spoken.text == "Done."
+    await spoken(bridge)
+    frame, speech = worker.frames
+    assert speech.text == "Done."
     assert not frame.run_llm
     (message,) = frame.messages
     assert message["role"] == "developer"
@@ -625,6 +631,7 @@ async def test_hold_catchup_consumed_before_reconnect() -> None:
     await bridge.hold(None)
     bridge._remember("answer", "shop", "Finished.")
     await bridge.release()
+    await spoken(bridge)
     assert len(first.frames) == 1
     assert not bridge._missed
     bridge.detach(first)
