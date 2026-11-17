@@ -227,3 +227,60 @@ assert.match(feedMarkdown('Which?\n1. **Fast**\n2. Careful'),
 assert(!feedMarkdown('<script>alert(1)</script>').includes('<script>'));
 """)
     subprocess.run(["node", str(script)], check=True, capture_output=True, text=True)
+
+
+def test_page_expanded_spoken_boundary(tmp_path) -> None:
+    import subprocess
+    from pathlib import Path
+
+    page = Path("src/voice_relay/web/voice.html").read_text()
+    renderer = "function escapeText(text)" + page.split(
+        "function escapeText(text)", 1,
+    )[1].split("function renderFeed()", 1)[0]
+    script = tmp_path / "expanded.mjs"
+    script.write_text("import assert from 'node:assert/strict';\n" + r'''
+const feedExpanded = new Set(), feedReplayBusy = new Set(), FEED_REPLAY_KINDS = new Set();
+const replyTo = null, projectColor = () => '#fff', renderFeed = () => {};
+function el(tag, attrs = {}, ...children) {
+  return {tag, ...attrs, children, handlers: {},
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; },
+    addEventListener(type, handler) { this.handlers[type] = handler; }};
+}
+''' + renderer + r'''
+function check(text, spoken, preview, remainder) {
+  const event = {id: 1, kind: 'answer', session: 'Test', text, spoken};
+  feedExpanded.clear();
+  let body = feedCard(event).children[1];
+  assert.equal(body.innerHTML, feedMarkdown(preview));
+  assert.equal(body.children.length, remainder ? 1 : 0);
+  if (!remainder) {
+    feedExpanded.add(1);
+    assert.equal(feedCard(event).children[1].children.length, 0);
+    return;
+  }
+  assert.equal(body.children[0].text, 'more');
+  let stopped = false;
+  body.children[0].handlers.click({stopPropagation() { stopped = true; }});
+  assert(stopped);
+  body = feedCard(event).children[1];
+  assert.equal(body.children[0].innerHTML, feedMarkdown(preview));
+  assert.equal(body.children[1].class, 'feed-detail');
+  assert.equal(body.children[1].innerHTML, feedMarkdown(remainder));
+  assert.equal(body.children[2].text, 'less');
+  body.children[2].handlers.click({stopPropagation() {}});
+  assert(!feedExpanded.has(1));
+}
+check('**Ready**\n---\n`Details`', undefined, '**Ready**', '`Details`');
+check('Ready\nExtra\n---\nDetails\n---\nTail', 'Ready', 'Ready', 'Details\nTail');
+check('Different summary\n---\n**Details**', 'Spoken', 'Spoken', '**Details**');
+check('One\nTwo\nThree\nFour', undefined, 'One\nTwo\nThree', 'Four');
+check('Ready\n---\n', 'Ready', 'Ready', '');
+check('Different summary', 'Spoken', 'Spoken', 'Different summary');
+check('Alphabet', 'Alpha', 'Alpha', 'Alphabet');
+check('Long hidden body', 'Short', 'Short', 'Long hidden body');
+check('  Ready extra  ', 'Ready', 'Ready', 'extra');
+check('Ready\nExtra', 'Ready', 'Ready', 'Extra');
+check('  Ready  ', 'Ready', 'Ready', '');
+''')
+    subprocess.run(["node", str(script)], check=True, capture_output=True, text=True)

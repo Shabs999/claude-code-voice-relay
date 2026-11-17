@@ -203,7 +203,9 @@ body.talking main { padding-bottom: 0; }
 #talk > :not(.log-wrap), .feed-card, .line { flex-shrink: 0; }
 .feed-body pre { margin: 6px 0; padding: 8px; overflow-x: auto; border-radius: 6px; background: var(--wa-color-surface-default); font-size: var(--wa-font-size-xs); }
 .feed-body code { font-family: var(--wa-font-family-code); font-size: .92em; }
-.feed-more { margin-left: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; }
+.feed-detail { border-top: 1px solid var(--wa-color-surface-border); margin: 8px 0; padding-top: 8px; }
+.feed-more { position: relative; margin-left: 4px; padding: 0; border: 0; background: none; color: var(--brand); font: inherit; font-size: var(--wa-font-size-xs); cursor: pointer; }
+.feed-more::after { content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: max(100%, 44px); height: max(100%, 32px); }
 .feed-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .feed-opt {
   min-width: 44px; min-height: 44px; padding: 8px 12px; border-radius: var(--wa-border-radius-m);
@@ -1019,7 +1021,19 @@ function feedCard(event) {
   const full = lines.filter(line => line !== "---").join("\n");
   const preview = (event.spoken || lines.slice(0, divider < 0 ? 3 : divider).join("\n")).trim() || full;
   const body = el("div", { class: "feed-body" });
-  body.innerHTML = feedMarkdown(expanded ? full : preview);
+  const remainder = (divider >= 0
+    ? lines.slice(divider + 1).filter(line => line !== "---").join("\n")
+    : full.trim().startsWith(preview) && /^(?:\s|$)/.test(full.trim().slice(preview.length))
+      ? full.trim().slice(preview.length)
+      : full.trim() !== preview ? full : "").trim();
+  body.innerHTML = feedMarkdown(preview);
+  if (expanded && remainder) {
+    const spoken = el("div");
+    spoken.innerHTML = feedMarkdown(preview);
+    const detail = el("div", { class: "feed-detail" });
+    detail.innerHTML = feedMarkdown(remainder);
+    body.replaceChildren(spoken, detail);
+  }
   const head = el("div", { class: "feed-head" }, el("span", { class: "feed-name", text: event.session }),
     el("span", { class: "feed-time", text: `· ${event.time}` }));
   if (FEED_REPLAY_KINDS.has(event.kind)) {
@@ -1061,7 +1075,7 @@ function feedCard(event) {
   if (feedReplayBusy.has(event.id)) {
     card.append(el("p", { class: "feed-replay-hint", text: "Busy — tap again in a moment" }));
   }
-  if (full !== preview) {
+  if (remainder) {
     const more = el("button", { type: "button", class: "feed-more", text: expanded ? "less" : "more" });
     more.addEventListener("click", click => {
       click.stopPropagation();
