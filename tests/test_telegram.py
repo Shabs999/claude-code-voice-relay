@@ -86,6 +86,7 @@ def _door(
     user: str = "42",
     token: str = "tok",
     openai: FakeOpenAI | None = None,
+    mirror: str = "all",
 ) -> tuple[telegram.Door, Bridge, FakeAPI]:
     bridge = Bridge(interval=0)
     api = FakeAPI()
@@ -108,6 +109,7 @@ def _door(
         bridge, api=api, openai=oai, user_id=int(user) if user else None,
     )
     door.map = telegram.MapStore(map_path)
+    door.map.mirror = {"*": mirror}
     door._token_present = True
     bridge._telegram = door
     return door, bridge, api
@@ -419,7 +421,7 @@ async def test_telegram_failure_preserves_voice(monkeypatch, tmp_path, failure) 
             raise RuntimeError("telegram failed")
         return await original(method, **params)
 
-    async def fail_hook(*args):
+    async def fail_hook(*args, **kwargs):
         raise RuntimeError("telegram hook failed")
 
     monkeypatch.setattr(bridge, "say", say)
@@ -429,7 +431,7 @@ async def test_telegram_failure_preserves_voice(monkeypatch, tmp_path, failure) 
         monkeypatch.setattr(door, "on_waiting", fail_hook)
     elif failure == "editMessageReplyMarkup":
         # Exercise the same edit failure through an outbound bridge hook.
-        async def edit_hook(*args):
+        async def edit_hook(*args, **kwargs):
             await api.call("editMessageReplyMarkup")
         monkeypatch.setattr(door, "on_answer", edit_hook)
     assert await bridge.answer(bridge.sessions["sid"], "Which one?\n1. alpha\n2. beta")
@@ -1705,3 +1707,203 @@ async def test_retry_preserves_arrival_order_across_delivery_kinds(monkeypatch, 
     )
     assert not door.map.dnd_queue
     await door.stop()
+
+
+async def test_mirror_default_is_mine(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    assert telegram.MapStore(tmp_path / "m.json").mirror == {}
+    door.map.mirror = {}
+    assert door._mirror("shop") == "mine"
+    await door._dispatch(_msg("/mirror"))
+    assert api.calls[-1][1]["text"] == "shop: mine\ndefault: mine"
+    door.map.mirror["shop"] = "mine"
+    await door._dispatch(_msg("/mirror all", mid=2))
+    assert door._mirror("shop") == "all"
+    assert telegram.MapStore.load(door.map.path).mirror == {"*": "all"}
+    assert api.calls[-1][1]["text"] == (
+        "Telegram copies: all, for every project (project overrides cleared)."
+    )
+
+
+async def test_telegram_asked_answer_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("shop run the tests"))
+    while not session.commands.empty():
+        session.commands.get_nowait()
+    assert session.telegram_asks == 1
+    await bridge.answer(session, "Tests pass.")
+    await bridge.drain_background()
+    assert any(method == "sendMessage" and "<b>shop</b>" in p["text"]
+               and "Tests pass." in p["text"] for method, p in api.calls)
+    assert session.telegram_asks == 0
+
+
+async def test_telegram_asked_then_voice_asked(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("shop run the tests"))
+    while not session.commands.empty():
+        session.commands.get_nowait()
+    assert session.telegram_asks == 1
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    await bridge.answer(session, "Tests pass.")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before + 1
+    before += 1
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "Done by voice.")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before
+
+
+async def test_voice_asked_plain_answer_not_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "All good.\n---\ndetail")
+    await bridge.drain_background()
+    assert not any(m in {"sendMessage", "sendVoice"} for m, _ in api.calls)
+    assert door.map.messages == {}
+    assert door.map.dnd_queue == []
+
+
+async def test_voice_asked_answer_with_options_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "Which one?\n1. alpha\n2. beta")
+    await bridge.drain_background()
+    sent = [p for m, p in api.calls if m == "sendMessage"]
+    assert len(sent) == 1
+    assert len(sent[0]["reply_markup"]["inline_keyboard"]) == 2
+
+
+async def test_keyboard_typed_answer_not_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await bridge.typed(session, "continue")
+    assert session.asked_door == "keyboard"
+    await bridge.answer(session, "Continued.")
+    await bridge.drain_background()
+    assert not any(m == "sendMessage" for m, _ in api.calls)
+
+
+async def test_waiting_answer_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    session.waiting = True
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "Shall I go ahead?")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == 1
+
+
+async def test_needs_you_update_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await bridge.update(session, "needs-you", "Which path?", ["Left", "Right"], False)
+    await bridge.drain_background()
+    sent = [p for m, p in api.calls if m == "sendMessage"]
+    assert len(sent) == 1
+    assert len(sent[0]["reply_markup"]["inline_keyboard"]) == 2
+
+
+async def test_milestone_update_not_delivered(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await bridge.update(session, "milestone", "Build is green.", None, False)
+    await bridge.drain_background()
+    assert not any(m in {"sendMessage", "sendVoice"} for m, _ in api.calls)
+
+
+async def test_mirror_all_restores(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("/mirror all"))
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "All good.")
+    await bridge.drain_background()
+    await bridge.update(session, "milestone", "Build is green.", None, False)
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before + 2
+    await door._dispatch(_msg("/mirror mine shop", mid=2))
+    assert api.calls[-1][1]["text"] == "Telegram copies for shop: mine."
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "Still good.")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before
+
+
+async def test_dnd_skip_not_queued(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("/dnd on"))
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    await bridge.send_task_direct(session, "x", text="x", door="voice")
+    await bridge.answer(session, "All good.")
+    await bridge.drain_background()
+    assert door.map.dnd_queue == []
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before
+
+
+async def test_busy_queue_counter(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("shop first", mid=1))
+    await door._dispatch(_msg("shop second", mid=2))
+    assert session.telegram_asks == 2
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    for index in range(3):
+        await bridge.answer(session, f"Answer {index}.")
+        await bridge.drain_background()
+        assert sum(m == "sendMessage" for m, _ in api.calls) == before + min(index + 1, 2)
+    assert session.telegram_asks == 0
+
+
+async def test_telegram_origin_consumed_after_answer(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path, mirror="mine")
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door._dispatch(_msg("shop run the tests"))
+    assert session.telegram_asks == 1
+    before = sum(m == "sendMessage" for m, _ in api.calls)
+    await bridge.answer(session, "Tests pass.")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before + 1
+    assert session.telegram_asks == 0
+    await bridge.answer(session, "Background work completed.")
+    await bridge.drain_background()
+    assert sum(m == "sendMessage" for m, _ in api.calls) == before + 1
+    assert session.asked_door == ""
+
+
+def test_map_mirror_round_trip(tmp_path):
+    path = tmp_path / "map.json"
+    path.write_text('{}')
+    store = telegram.MapStore.load(path)
+    assert store.mirror == {}
+    door = telegram.Door(Bridge(interval=0), map=store)
+    assert door._mirror("shop") == "mine"
+    store.mirror = {"*": "all", "shop": "mine", "other": "all"}
+    store.save()
+    loaded = telegram.MapStore.load(path)
+    assert loaded.mirror == store.mirror
+    door.map = loaded
+    assert door._mirror("shop") == "mine"
+    assert door._mirror("other") == "all"
+    assert door._mirror("unlisted") == "all"

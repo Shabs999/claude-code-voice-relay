@@ -55,6 +55,7 @@ OFFSET = "offset"
 DND = "dnd"
 DND_QUEUE = "dnd_queue"
 DND_DROPPED = "dnd_dropped"
+MIRROR = "mirror"
 
 
 class TelegramAPI(Protocol):
@@ -158,6 +159,7 @@ class MapStore:
     dnd: bool = False
     dnd_queue: list[dict[str, Any]] = field(default_factory=list)
     dnd_dropped: int = 0
+    mirror: dict[str, str] = field(default_factory=dict)
     _corrupt_logged: bool = False
 
     @classmethod
@@ -182,6 +184,11 @@ class MapStore:
         queue = raw.get(DND_QUEUE, [])
         store.dnd_queue = list(queue) if isinstance(queue, list) else []
         store.dnd_dropped = int(raw.get(DND_DROPPED, 0))
+        mirror = raw.get(MIRROR, {})
+        store.mirror = {
+            k: v for k, v in mirror.items()
+            if isinstance(k, str) and isinstance(v, str)
+        } if isinstance(mirror, dict) else {}
         store._trim()
         return store
 
@@ -195,6 +202,7 @@ class MapStore:
             DND: self.dnd,
             DND_QUEUE: self.dnd_queue,
             DND_DROPPED: self.dnd_dropped,
+            MIRROR: self.mirror,
         }
         temporary = self.path.parent / f"telegram-{secrets.token_hex(8)}.tmp"
         try:
@@ -671,8 +679,20 @@ class Door:
         self.map.queue_dnd(failed)
         self._schedule_dnd_retry()
 
-    async def on_answer(self, session: Session, text: str) -> None:
+    def _mirror(self, name: str) -> str:
+        if self.map is None:
+            return "mine"
+        return self.map.mirror.get(name) or self.map.mirror.get("*") or "mine"
+
+    async def on_answer(
+        self, session: Session, text: str, *, origin: str = "", waiting: bool = False,
+    ) -> None:
         if self.mode() != "on" or self.user_id is None or self.api is None:
+            return
+        copy = (self._mirror(session.name) == "all" or origin.startswith("telegram")
+                or bool(detect_options(text)) or waiting)
+        if not copy:
+            logger.info("telegram: skipped answer from {} (origin={})", session.name, origin or "none")
             return
         await self._enqueue_delivery(("answer", session, text))
 
@@ -753,6 +773,9 @@ class Door:
         self, session: Session, kind: str, text: str, options: list[str] | None,
     ) -> None:
         if self.mode() != "on" or self.user_id is None or self.api is None:
+            return
+        if kind != "needs-you" and self._mirror(session.name) != "all":
+            logger.info("telegram: skipped {} update from {}", kind, session.name)
             return
         await self._enqueue_delivery(("update", session, kind, text, options))
 
@@ -1154,7 +1177,35 @@ class Door:
                 lines.append(f"{escape_html(row['name'])}: {state}")
             dnd = "on" if self.map and self.map.dnd else "off"
             lines.append(f"Do not disturb: {dnd}")
+            mirror = (self.map.mirror.get("*") or "mine") if self.map else "mine"
+            lines.append(f"Telegram copies: {mirror}")
             body = "\n".join(lines) if lines else "No linked projects."
+            await self._send(body, reply_to=message.get("message_id"))
+        elif cmd == "/mirror":
+            assert self.map is not None
+            parts = text.split(maxsplit=2)
+            if len(parts) == 1:
+                lines = [
+                    f"{escape_html(s.name)}: {self._mirror(s.name)}"
+                    for s in self.bridge.sessions.all()
+                ]
+                lines.append(f"default: {self.map.mirror.get('*') or 'mine'}")
+                body = "\n".join(lines)
+            elif parts[1] not in {"all", "mine"}:
+                body = "Use /mirror all or /mirror mine, optionally followed by a project name."
+            elif len(parts) == 2:
+                value = parts[1]
+                self.map.mirror = {"*": value}
+                self.map.save()
+                body = f"Telegram copies: {value}, for every project (project overrides cleared)."
+            else:
+                session = self.bridge.sessions.find(parts[2])
+                if isinstance(session, str):
+                    body = session
+                else:
+                    self.map.mirror[session.name] = parts[1]
+                    self.map.save()
+                    body = f"Telegram copies for {escape_html(session.name)}: {parts[1]}."
             await self._send(body, reply_to=message.get("message_id"))
         elif cmd == "/dnd":
             parts = text.split()

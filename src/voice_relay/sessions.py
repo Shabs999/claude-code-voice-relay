@@ -33,6 +33,8 @@ class Session:
     waiting: bool = False
     asked_at: float | None = None
     asked_text: str = ""
+    asked_door: str = ""
+    telegram_asks: int = 0
     reminded: bool = False
     stopping: bool = False  # the operator stopped the turn by voice
     restarting: bool = False  # and gave what to do instead

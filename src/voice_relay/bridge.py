@@ -685,12 +685,19 @@ class Bridge:
         return await self._append(HISTORY.format(name=session.name, history=text))
 
     async def typed(self, session: Session, text: str) -> bool:
+        session.asked_door = "keyboard"
         session.running = True
         return await self._append(TYPED.format(name=session.name, text=text))
 
     async def answer(self, session: Session, text: str) -> bool:
         stopped, restarting = session.stopping and text == STOPPED, session.restarting
         session.stopping = session.restarting = False
+        was_waiting = session.waiting
+        origin = "telegram" if session.telegram_asks > 0 else session.asked_door
+        if session.telegram_asks > 0:
+            session.telegram_asks -= 1
+        if origin.startswith("telegram") and session.telegram_asks == 0:
+            session.asked_door = ""
         session.running, session.waiting = stopped and restarting, False  # the next task waits
         session.asked_at = None
         if stopped:  # the operator asked for it and heard it confirmed
@@ -708,7 +715,7 @@ class Bridge:
         self.feed.record_answer(session, text)
         if self._telegram is not None:
             self._telegram_background(
-                self._telegram.on_answer(session, text),
+                self._telegram.on_answer(session, text, origin=origin, waiting=was_waiting),
                 "telegram: answer hook failed: {}",
             )
         spoken, detail = split_answer(text)
@@ -769,6 +776,9 @@ class Bridge:
         busy, session.running = session.running, True
         session.asked_at = time.monotonic()
         session.asked_text = asked or message
+        session.asked_door = door
+        if door.startswith("telegram"):
+            session.telegram_asks += 1
         session.reminded = False
         session.send(TASK, message)
         self.feed.record_you(session, message if asked is None else asked, door, attachments)
