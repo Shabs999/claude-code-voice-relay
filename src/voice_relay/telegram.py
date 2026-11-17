@@ -38,6 +38,10 @@ PENDING_SECONDS = 600.0
 MAP_ENTRIES = 2000
 EXCERPT = 800
 SEND_LIMIT = 4000
+
+
+def utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 TELEGRAM_MAX_BYTES = 20 * 1024 * 1024
 DND_QUEUE_MAX = 50
 ALBUM_WAIT = 2.0
@@ -243,6 +247,10 @@ def _excerpt(text: str) -> str:
     return text[:EXCERPT] + "…"
 
 
+def _redact_transport_error(text: str) -> str:
+    return re.sub(r"bot\d+:[^\s\"'<>]+", "bot<redacted>", text)
+
+
 def _strip_rule_lines(text: str) -> str:
     lines = text.replace("\r\n", "\n").split("\n")
     return "\n".join(line for line in lines if line.strip() != "---")
@@ -299,8 +307,8 @@ def split_outbound(text: str, *, limit: int = SEND_LIMIT) -> list[str]:
                     match = None
             else:
                 next_stack.append((match[2], token))
-        reserve = sum(len(name) + 3 for name, _ in next_stack)
-        if len(chunk) + len(token) + reserve > limit:
+        reserve = sum(utf16_len(name) + 3 for name, _ in next_stack)
+        if utf16_len(chunk) + utf16_len(token) + reserve > limit:
             chunks.append(chunk + closing())
             chunk = "".join(tag for _, tag in stack)
         chunk += token
@@ -325,11 +333,20 @@ def format_inbound(
     reply_wall: float | None = None,
     reply_header: bool = False,
     reply_part: bool = False,
+    reply_foreign: bool = False,
+    forward_origin: str | None = None,
+    forward_text: str | None = None,
     channel: str = "Telegram",
     attachments: tuple[str, ...] = (),
 ) -> str:
     when = clock(wall)
-    if reply_text is None:
+    if forward_origin is not None and forward_text is not None:
+        full = forward_text.replace("\r\n", "\n")
+        quoted = "\n".join(f"> {line}" for line in full.splitlines())
+        body = f"Shahab forwarded, by {channel} ({when}), from {forward_origin}:\n{quoted}"
+        if text:
+            body += f"\n\n{text}"
+    elif reply_text is None:
         body = f"Shahab, by {channel} ({when}):\n{text}"
     else:
         reply_when = clock(reply_wall or wall)
@@ -341,6 +358,10 @@ def format_inbound(
         elif reply_header:
             prefix = (
                 f"Shahab, by {channel} ({when}), replying to your message of {reply_when}:\n"
+            )
+        elif reply_foreign:
+            prefix = (
+                f"Shahab, by {channel} ({when}), quoting a message in the chat:\n"
             )
         else:
             prefix = f"Shahab, by {channel} ({when}):\n"
@@ -381,6 +402,12 @@ class Door:
     _album_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _stt_model: str = DEFAULT_STT_MODEL
     _html_failure_logged: bool = False
+    _dnd_retry_task: asyncio.Task[None] | None = None
+    _dnd_flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _outbox: asyncio.Queue[tuple[tuple[Any, ...], asyncio.Future[None]]] = field(
+        default_factory=asyncio.Queue,
+    )
+    _outbox_task: asyncio.Task[None] | None = None
 
     def mode(self) -> str:
         if not self._token_present:
@@ -416,6 +443,13 @@ class Door:
             logger.info("telegram: claim mode (token set, no user)")
         else:
             logger.info("telegram: on (user linked)")
+        self._ensure_outbox_worker()
+        if (
+            self.map
+            and not self._dnd_active()
+            and any(item.get("failed") for item in self.map.dnd_queue)
+        ):
+            self._schedule_dnd_retry()
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -424,80 +458,90 @@ class Door:
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        for task in self._album_tasks.values():
+            task.cancel()
+        self._album_tasks.clear()
+        if self._dnd_retry_task is not None:
+            self._dnd_retry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._dnd_retry_task
+            self._dnd_retry_task = None
+        if self._outbox_task is not None:
+            self._outbox_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._outbox_task
+            self._outbox_task = None
+        self.bridge.cancel_background()
+        self.bridge._telegram = None
         if isinstance(self.api, HttpxTelegram):
             await self.api.close()
         if isinstance(self.openai, HttpxOpenAI):
             await self.openai.close()
-        for task in self._album_tasks.values():
-            task.cancel()
-        self._album_tasks.clear()
-        self.bridge._telegram = None
 
     def _dnd_active(self) -> bool:
         return bool(self.map and self.map.dnd)
 
-    async def on_answer(self, session: Session, text: str) -> None:
+    def _delivery_backlogged(self) -> bool:
+        return bool(self.map and self.map.dnd_queue)
+
+    def _ensure_outbox_worker(self) -> None:
+        if self._outbox_task is None or self._outbox_task.done():
+            self._outbox_task = asyncio.create_task(self._outbox_worker())
+
+    async def _outbox_worker(self) -> None:
+        while True:
+            item, completion = await self._outbox.get()
+            try:
+                async with self._dnd_flush_lock:
+                    await self._run_outbox_item(item)
+            except Exception as error:
+                logger.warning(
+                    "telegram: outbox delivery failed: {}",
+                    type(error).__name__,
+                )
+            finally:
+                if not completion.done():
+                    completion.set_result(None)
+                self._outbox.task_done()
+
+    async def _enqueue_delivery(self, item: tuple[Any, ...]) -> None:
+        self._ensure_outbox_worker()
+        completion = asyncio.get_running_loop().create_future()
+        self._outbox.put_nowait((item, completion))
+        await completion
+
+    async def _run_outbox_item(self, item: tuple[Any, ...]) -> None:
+        kind = item[0]
         if self.mode() != "on" or self.user_id is None or self.api is None:
             return
-        body = _strip_rule_lines(text)
-        if self._dnd_active() and self.map is not None:
+        assert self.map is not None
+        if kind == "answer":
+            session, text = item[1], item[2]
             wall = time.time()
-            self.map.queue_dnd({
+            queued = {
                 "kind": "answer",
                 "session": session.name,
                 "text": text,
                 "wall": wall,
                 "time": clock(wall),
-            })
+            }
+            if self._dnd_active() or self._delivery_backlogged():
+                self.map.queue_dnd(queued)
+                return
+            body = _strip_rule_lines(text)
+            await self._deliver_answer(
+                session, body, spoken_source=text, source_text=text,
+            )
             return
-        await self._deliver_answer(session, body, spoken_source=text)
-
-    async def _deliver_answer(
-        self, session: Session, body: str, *, spoken_source: str | None = None,
-        wall: float | None = None,
-    ) -> None:
-        assert self.api is not None and self.map is not None
-        wall = time.time() if wall is None else wall
-        header = f"<b>{escape_html(session.name)}</b>"
-        chunks = split_outbound(markdown_html(body), limit=SEND_LIMIT - len(header) - 1)
-        keyboard = numbered_keyboard(spoken_source if spoken_source is not None else body)
-        last_id: int | None = None
-        for index, chunk in enumerate(chunks):
-            reply_markup = None
-            if keyboard and index == len(chunks) - 1:
-                choice_id = secrets.token_hex(4)
-                numbers = [row[0]["text"] for row in keyboard]
-                self.map.pending[choice_id] = {
-                    "kind": "opt", "session": session.name, "numbers": numbers,
-                    "at": time.time(), "time": clock(time.time()),
-                }
-                self.map.save()
-                reply_markup = {"inline_keyboard": [
-                    [{"text": n, "callback_data": f"opt:{choice_id}:{n}"}] for n in numbers
-                ]}
-            last_id = await self._send(
-                header + "\n" + chunk, reply_markup=reply_markup,
-            )
-            if last_id is not None:
-                self.map.remember_message(last_id, session=session.name, text=body, wall=wall)
-        if last_id is not None:
-            await self._voice_reply(
-                session.name, spoken_source or body, reply_to=last_id,
-            )
-
-    async def on_update(
-        self, session: Session, kind: str, text: str, options: list[str] | None,
-    ) -> None:
-        if self.mode() != "on" or self.user_id is None or self.api is None:
-            return
-        spoken = text
-        if kind == "needs-you" and options:
-            spoken = text + "\nWhich one?\n" + "\n".join(
-                f"{index}. {option}" for index, option in enumerate(options, 1)
-            )
-        if self._dnd_active() and self.map is not None:
+        if kind == "update":
+            session, update_kind, text, options = item[1], item[2], item[3], item[4]
+            spoken = text
+            if update_kind == "needs-you" and options:
+                spoken = text + "\nWhich one?\n" + "\n".join(
+                    f"{index}. {option}" for index, option in enumerate(options, 1)
+                )
             wall = time.time()
-            self.map.queue_dnd({
+            queued = {
                 "kind": "update",
                 "session": session.name,
                 "text": text,
@@ -505,17 +549,229 @@ class Door:
                 "spoken": spoken,
                 "wall": wall,
                 "time": clock(wall),
-            })
+            }
+            if self._dnd_active() or self._delivery_backlogged():
+                self.map.queue_dnd(queued)
+                return
+            await self._deliver_update(session, text, spoken_source=spoken, options=options)
             return
-        await self._deliver_update(session, text, spoken_source=spoken, options=options)
+        if kind == "waiting":
+            session, action = item[1], item[2]
+            wall = time.time()
+            queued = {
+                "kind": "waiting",
+                "session": session.name,
+                "text": action,
+                "wall": wall,
+                "time": clock(wall),
+            }
+            if self._dnd_active() or self._delivery_backlogged():
+                self.map.queue_dnd(queued)
+                return
+            text = (
+                f"<b>{escape_html(session.name)}</b> is waiting on you: "
+                f"{escape_html(action)}"
+            )
+            if await self._send(text, session=session.name) is None:
+                self._queue_failed_delivery(queued)
+
+    def _send_error_info(self, error: Exception) -> tuple[int | None, str, float | None]:
+        response = getattr(error, "response", None)
+        if response is None:
+            return None, _redact_transport_error(str(error))[:160], None
+        status = response.status_code
+        retry_after: float | None = None
+        try:
+            data = response.json()
+            description = _redact_transport_error(
+                str(data.get("description") or response.text),
+            )[:160]
+            parameters = data.get("parameters") or {}
+            raw = parameters.get("retry_after")
+            if raw is not None:
+                retry_after = float(raw)
+        except (TypeError, ValueError, AttributeError):
+            description = _redact_transport_error(response.text or str(error))[:160]
+        return status, description, retry_after
+
+    def _html_send_reject(self, error: Exception) -> bool:
+        response = getattr(error, "response", None)
+        if response is None:
+            return False
+        description = response.text if hasattr(response, "text") else str(error)
+        return (
+            "can't parse entities" in description.lower()
+            and response.status_code == 400
+        )
+
+    def _keyboard_chunk_index(self, chunks: list[str], numbers: list[str]) -> int:
+        if not numbers:
+            return len(chunks) - 1
+        needle = f"{numbers[0]}."
+        for index, chunk in enumerate(chunks):
+            if needle in chunk:
+                return index
+        return len(chunks) - 1
+
+    def _forward_origin_name(self, message: dict[str, Any]) -> str | None:
+        origin = message.get("forward_origin")
+        if isinstance(origin, dict):
+            kind = origin.get("type")
+            if kind == "user":
+                sender = origin.get("sender_user") or {}
+                name = f"{sender.get('first_name', '')} {sender.get('last_name', '')}".strip()
+                username = sender.get("username")
+                if username:
+                    name = f"{name} @{username}".strip()
+                return name or "someone"
+            if kind == "hidden_user":
+                return str(origin.get("sender_user_name") or "someone")
+            if kind in {"chat", "channel"}:
+                chat = origin.get("sender_chat") or origin.get("chat") or {}
+                return str(chat.get("title") or "someone")
+            return "someone"
+        forward_from = message.get("forward_from")
+        if isinstance(forward_from, dict):
+            name = (
+                f"{forward_from.get('first_name', '')} {forward_from.get('last_name', '')}".strip()
+            )
+            username = forward_from.get("username")
+            if username:
+                name = f"{name} @{username}".strip()
+            return name or "someone"
+        forward_name = message.get("forward_sender_name")
+        if forward_name:
+            return str(forward_name)
+        forward_chat = message.get("forward_from_chat")
+        if isinstance(forward_chat, dict):
+            return str(forward_chat.get("title") or "someone")
+        return None
+
+    def _schedule_dnd_retry(self) -> None:
+        if self._dnd_retry_task is not None and not self._dnd_retry_task.done():
+            return
+        self._dnd_retry_task = asyncio.create_task(self._dnd_retry_after())
+
+    async def _dnd_retry_after(self) -> None:
+        try:
+            await asyncio.sleep(60)
+            if not self._dnd_active():
+                await self._flush_dnd()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._dnd_retry_task = None
+        if self.map and self.map.dnd_queue:
+            asyncio.get_running_loop().call_soon(self._schedule_dnd_retry)
+
+    def _queue_failed_delivery(self, item: dict[str, Any]) -> None:
+        assert self.map is not None
+        failed = dict(item)
+        failed["failed"] = True
+        self.map.queue_dnd(failed)
+        self._schedule_dnd_retry()
+
+    async def on_answer(self, session: Session, text: str) -> None:
+        if self.mode() != "on" or self.user_id is None or self.api is None:
+            return
+        await self._enqueue_delivery(("answer", session, text))
+
+    async def _deliver_answer(
+        self,
+        session: Session | None,
+        body: str,
+        *,
+        spoken_source: str | None = None,
+        wall: float | None = None,
+        session_name: str | None = None,
+        queue_on_failure: bool = True,
+        source_text: str | None = None,
+        outbound_chunks: list[str] | None = None,
+        no_keyboard: bool = False,
+        in_place_queue_item: dict[str, Any] | None = None,
+    ) -> bool:
+        assert self.api is not None and self.map is not None
+        name = session.name if session is not None else session_name
+        if not name:
+            return False
+        wall = time.time() if wall is None else wall
+        header = f"<b>{escape_html(name)}</b>"
+        chunk_limit = SEND_LIMIT - utf16_len(header) - 1
+        chunks = (
+            outbound_chunks
+            if outbound_chunks is not None
+            else split_outbound(markdown_html(body), limit=chunk_limit)
+        )
+        source = spoken_source if spoken_source is not None else body
+        keyboard = None if no_keyboard else numbered_keyboard(source)
+        key_index = self._keyboard_chunk_index(
+            chunks, [row[0]["text"] for row in keyboard] if keyboard else [],
+        )
+        last_id: int | None = None
+        for index, chunk in enumerate(chunks):
+            reply_markup = None
+            if keyboard and index == key_index:
+                choice_id = secrets.token_hex(4)
+                numbers = [row[0]["text"] for row in keyboard]
+                self.map.pending[choice_id] = {
+                    "kind": "opt", "session": name, "numbers": numbers,
+                    "at": time.time(), "time": clock(time.time()),
+                }
+                self.map.save()
+                reply_markup = {"inline_keyboard": [
+                    [{"text": n, "callback_data": f"opt:{choice_id}:{n}"}] for n in numbers
+                ]}
+            message_id = await self._send(
+                header + "\n" + chunk, reply_markup=reply_markup, session=name,
+            )
+            if message_id is None:
+                failed_item: dict[str, Any] = {
+                    "kind": "answer",
+                    "session": name,
+                    "text": source_text or spoken_source or body,
+                    "wall": wall,
+                    "time": clock(wall),
+                    "outbound_chunks": chunks[index:],
+                }
+                if keyboard is not None and key_index < index:
+                    failed_item["no_keyboard"] = True
+                if queue_on_failure:
+                    self._queue_failed_delivery(failed_item)
+                elif in_place_queue_item is not None:
+                    in_place_queue_item.update(failed_item)
+                    self.map.save()
+                return False
+            last_id = message_id
+            self.map.remember_message(last_id, session=name, text=body, wall=wall)
+        if last_id is not None:
+            await self._voice_reply(
+                name, spoken_source or body, reply_to=last_id,
+            )
+        return True
+
+    async def on_update(
+        self, session: Session, kind: str, text: str, options: list[str] | None,
+    ) -> None:
+        if self.mode() != "on" or self.user_id is None or self.api is None:
+            return
+        await self._enqueue_delivery(("update", session, kind, text, options))
 
     async def _deliver_update(
-        self, session: Session, text: str, *, spoken_source: str,
+        self,
+        session: Session | None,
+        text: str,
+        *,
+        spoken_source: str,
         options: list[str] | None,
         wall: float | None = None,
-    ) -> None:
+        session_name: str | None = None,
+        queue_on_failure: bool = True,
+    ) -> bool:
         assert self.api is not None and self.map is not None
-        body = f"<b>{escape_html(session.name)}</b>: {escape_html(text)}"
+        name = session.name if session is not None else session_name
+        if not name:
+            return False
+        body = f"<b>{escape_html(name)}</b>: {escape_html(text)}"
         if options:
             body += "\n" + "\n".join(
                 f"{index}. {escape_html(option)}" for index, option in enumerate(options, 1)
@@ -526,33 +782,34 @@ class Door:
             choice_id = secrets.token_hex(4)
             numbers = [row[0]["text"] for row in keyboard]
             self.map.pending[choice_id] = {
-                "kind": "opt", "session": session.name, "numbers": numbers,
+                "kind": "opt", "session": name, "numbers": numbers,
                 "at": time.time(), "time": clock(time.time()),
             }
             self.map.save()
             reply_markup = {"inline_keyboard": [
                 [{"text": n, "callback_data": f"opt:{choice_id}:{n}"}] for n in numbers
             ]}
-        last_id = await self._send(body, reply_markup=reply_markup)
-        if last_id is not None:
-            self.map.remember_message(last_id, session=session.name, text=spoken_source, wall=wall)
-            await self._voice_reply(session.name, spoken_source, reply_to=last_id)
+        last_id = await self._send(body, reply_markup=reply_markup, session=name)
+        if last_id is None:
+            if queue_on_failure:
+                self._queue_failed_delivery({
+                    "kind": "update",
+                    "session": name,
+                    "text": text,
+                    "spoken": spoken_source,
+                    "options": options,
+                    "wall": wall or time.time(),
+                    "time": clock(wall or time.time()),
+                })
+            return False
+        self.map.remember_message(last_id, session=name, text=spoken_source, wall=wall)
+        await self._voice_reply(name, spoken_source, reply_to=last_id)
+        return True
 
     async def on_waiting(self, session: Session, action: str) -> None:
         if self.mode() != "on" or self.user_id is None or self.api is None:
             return
-        if self._dnd_active() and self.map is not None:
-            wall = time.time()
-            self.map.queue_dnd({
-                "kind": "waiting",
-                "session": session.name,
-                "text": action,
-                "wall": wall,
-                "time": clock(wall),
-            })
-            return
-        text = f"<b>{escape_html(session.name)}</b> is waiting on you: {escape_html(action)}"
-        await self._send(text, session=session.name)
+        await self._enqueue_delivery(("waiting", session, action))
 
     async def _send(
         self,
@@ -577,25 +834,43 @@ class Door:
             params["reply_to_message_id"] = reply_to
         if reply_markup is not None:
             params["reply_markup"] = reply_markup
-        try:
-            result = await self.api.call("sendMessage", **params)
-        except Exception as error:
-            response = getattr(error, "response", None)
-            description = response.text if response is not None else str(error)
-            if "can't parse entities" not in description.lower() or (
-                response is not None and response.status_code != 400
-            ):
-                logger.warning("telegram: send failed: {}", type(error).__name__)
-                return None
-            if not self._html_failure_logged:
-                logger.warning("telegram: HTML rejected; retrying as plain text")
-                self._html_failure_logged = True
-            params.pop("parse_mode")
-            params["text"] = html.unescape(re.sub(r"<[^>]*>", "", text))
+
+        async def deliver(attempt_params: dict[str, Any]) -> dict[str, Any]:
+            return await self.api.call("sendMessage", **attempt_params)
+
+        retried = False
+        while True:
             try:
-                result = await self.api.call("sendMessage", **params)
-            except Exception as retry_error:
-                logger.warning("telegram: send failed: {}", type(retry_error).__name__)
+                result = await deliver(params)
+                break
+            except Exception as error:
+                if self._html_send_reject(error):
+                    if not self._html_failure_logged:
+                        logger.warning("telegram: HTML rejected; retrying as plain text")
+                        self._html_failure_logged = True
+                    plain = dict(params)
+                    plain.pop("parse_mode", None)
+                    plain["text"] = html.unescape(re.sub(r"<[^>]*>", "", text))
+                    try:
+                        result = await deliver(plain)
+                        break
+                    except Exception as retry_error:
+                        error = retry_error
+                if not retried:
+                    status, _description, retry_after = self._send_error_info(error)
+                    if status == 429:
+                        delay = min(retry_after or 1, 30)
+                        await asyncio.sleep(delay)
+                    else:
+                        await asyncio.sleep(1)
+                    retried = True
+                    continue
+                status, description, _retry_after = self._send_error_info(error)
+                label = status if status is not None else type(error).__name__
+                logger.warning(
+                    "telegram: send failed ({}, {}) for {}",
+                    label, description, session or "?",
+                )
                 return None
         message_id = int(result.get("message_id", 0)) or None
         if message_id is not None and session is not None and self.map is not None:
@@ -699,15 +974,15 @@ class Door:
 
     async def _flush_dnd(self) -> None:
         assert self.map is not None and self.api is not None
+        async with self._dnd_flush_lock:
+            await self._flush_dnd_locked()
+
+    async def _flush_dnd_locked(self) -> None:
+        assert self.map is not None and self.api is not None
         queue = list(self.map.dnd_queue)
         if not queue:
             return
-        self.map.dnd_queue = []
-        self.map.save()
-        waiting = [item for item in queue if item.get("kind") == "waiting"]
-        updates = [item for item in queue if item.get("kind") == "update"]
-        answers = [item for item in queue if item.get("kind") == "answer"]
-        ordered = waiting + updates + answers
+        ordered = queue
         lines = ["While you were away:"]
         for item in ordered:
             name = escape_html(str(item.get("session", "")))
@@ -717,29 +992,57 @@ class Door:
             lines.append(f"<b>{name}</b> ({when}): {snippet}")
         for chunk in split_outbound("\n".join(lines)):
             await self._send(chunk)
-        for item in answers:
+        for item in ordered:
+            kind = item.get("kind")
+            name = str(item.get("session", ""))
             session = next(
-                (s for s in self.bridge.sessions.all() if s.name == item.get("session")), None,
+                (s for s in self.bridge.sessions.all() if s.name == name), None,
             )
-            if session is None:
+            ok = True
+            if kind == "waiting":
+                text = (
+                    f"<b>{escape_html(name)}</b> is waiting on you: "
+                    f"{escape_html(str(item.get('text', '')))}"
+                )
+                ok = (await self._send(text, session=name)) is not None
+            elif kind == "answer":
+                outbound = item.get("outbound_chunks")
+                ok = await self._deliver_answer(
+                    session,
+                    _strip_rule_lines(str(item.get("text", ""))),
+                    spoken_source=str(item.get("text", "")),
+                    wall=item.get("wall"),
+                    session_name=name if session is None else None,
+                    queue_on_failure=False,
+                    source_text=str(item.get("text", "")),
+                    outbound_chunks=list(outbound) if outbound else None,
+                    no_keyboard=bool(item.get("no_keyboard")),
+                    in_place_queue_item=item,
+                )
+            elif kind == "update":
+                spoken = str(item.get("spoken") or item.get("text", ""))
+                ok = await self._deliver_update(
+                    session,
+                    str(item.get("text", "")),
+                    spoken_source=spoken,
+                    options=item.get("options"),
+                    wall=item.get("wall"),
+                    session_name=name if session is None else None,
+                    queue_on_failure=False,
+                )
+            else:
                 continue
-            await self._deliver_answer(
-                session, _strip_rule_lines(str(item.get("text", ""))),
-                spoken_source=str(item.get("text", "")),
-                wall=item.get("wall"),
-            )
-        for item in updates:
-            session = next(
-                (s for s in self.bridge.sessions.all() if s.name == item.get("session")), None,
-            )
-            if session is None:
-                continue
-            spoken = str(item.get("spoken") or item.get("text", ""))
-            await self._deliver_update(
-                session, str(item.get("text", "")), spoken_source=spoken,
-                options=item.get("options"),
-                wall=item.get("wall"),
-            )
+            if not ok:
+                remaining = len(self.map.dnd_queue)
+                await self._send(
+                    f"{remaining} items are still queued; they will be retried.",
+                )
+                if asyncio.current_task() is not self._dnd_retry_task:
+                    self._schedule_dnd_retry()
+                return
+            if item in self.map.dnd_queue:
+                self.map.dnd_queue.remove(item)
+                self.map.save()
 
     async def _poll_loop(self) -> None:
         assert self.api is not None
@@ -912,6 +1215,13 @@ class Door:
             await self._offer_projects(caption, lead, media_messages=messages)
             return
         if isinstance(session, str):
+            if session.startswith("unlinked:"):
+                unlinked = session.split(":", 1)[1]
+                await self._send(
+                    f"{escape_html(unlinked)} is not linked right now; nothing was sent.",
+                    reply_to=lead.get("message_id"),
+                )
+                return
             await self._send(session, reply_to=lead.get("message_id"))
             return
         saved = await self._save_attachments(session, messages)
@@ -1013,6 +1323,13 @@ class Door:
             )
             return
         if isinstance(session, str):
+            if session.startswith("unlinked:"):
+                unlinked = session.split(":", 1)[1]
+                await self._send(
+                    f"{escape_html(unlinked)} is not linked right now; nothing was sent.",
+                    reply_to=message.get("message_id"),
+                )
+                return
             await self._send(session, reply_to=message.get("message_id"))
             return
         body = self._build_body(
@@ -1038,13 +1355,16 @@ class Door:
     def _route(self, text: str, message: dict[str, Any]) -> Session | str | Literal["pending"]:
         reply = message.get("reply_to_message") or {}
         reply_id = reply.get("message_id")
+        mapped_reply = False
         if reply_id is not None and self.map is not None:
             mapped = self.map.messages.get(str(reply_id))
             if mapped and mapped.get("session"):
+                mapped_reply = True
                 target = str(mapped["session"])
                 for session in self.bridge.sessions.all():
                     if session.name == target or key(session.name) == key(target):
                         return session
+                return f"unlinked:{target}"
         live = self.bridge.sessions.live()
         matches = [s for s in live if mentioned(s.name, text)]
         if len(matches) == 1:
@@ -1062,13 +1382,33 @@ class Door:
         attachments: tuple[str, ...] = (),
     ) -> str:
         wall = float(message.get("date", time.time()))
+        forward_origin = self._forward_origin_name(message)
+        if forward_origin is not None:
+            msg_text = (message.get("text") or message.get("caption") or "").strip()
+            if (message.get("voice") or message.get("audio")) and text.strip():
+                forward_text = text.strip()
+            elif not msg_text and text.strip():
+                forward_text = text.strip()
+            else:
+                forward_text = msg_text
+            operator_text = ""
+            return format_inbound(
+                operator_text,
+                wall=wall,
+                forward_origin=forward_origin,
+                forward_text=forward_text,
+                channel=channel,
+                attachments=attachments,
+            )
         reply = message.get("reply_to_message") or {}
         reply_text = (reply.get("text") or reply.get("caption") or "").strip()
         reply_wall: float | None = None
         mapped_excerpt = None
+        reply_mapped = False
         if reply.get("message_id") and self.map is not None:
             mapped = self.map.messages.get(str(reply["message_id"]))
             if mapped:
+                reply_mapped = True
                 reply_wall = float(mapped.get("wall", reply.get("date", wall)))
                 mapped_excerpt = mapped.get("excerpt")
         if mapped_excerpt and (not reply_text or reply.get("voice")):
@@ -1083,8 +1423,9 @@ class Door:
                 wall=wall,
                 reply_text=quote_text or reply_text,
                 reply_wall=reply_wall,
-                reply_header=True,
+                reply_header=reply_mapped,
                 reply_part=bool(quote_text),
+                reply_foreign=not reply_mapped,
                 channel=channel,
                 attachments=attachments,
             )

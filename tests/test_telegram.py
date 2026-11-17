@@ -150,7 +150,7 @@ def test_format_and_helpers() -> None:
     assert stripped == "a\nb"
     chunks = telegram.split_outbound("a" + "\n\n" + "b" * 5000)
     assert len(chunks) >= 2
-    assert all(len(c) <= telegram.SEND_LIMIT for c in chunks)
+    assert all(telegram.utf16_len(c) <= telegram.SEND_LIMIT for c in chunks)
     kb = telegram.numbered_keyboard("Which one?\n1. first\n2. second\n")
     assert kb is not None and len(kb) == 2
 
@@ -247,20 +247,28 @@ async def test_answer_waiting_and_options(
     await _link(bridge)
     session = bridge.sessions["sid"]
     await bridge.answer(session, "Pick one?\n1. alpha\n2. beta\n---\nsecret")
+    await bridge.drain_background()
     sends = [c for c in api.calls if c[0] == "sendMessage"]
     assert sends
     assert "---" not in sends[0][1]["text"]
     assert "<b>shop</b>" in sends[0][1]["text"]
     assert "\n---\n" not in sends[0][1]["text"]
     await bridge.waiting(session, "approve command")
-    assert "waiting on you" in api.calls[-1][1]["text"]
+    await bridge.drain_background()
+    waiting_send = next(
+        c for c in reversed(api.calls)
+        if c[0] == "sendMessage" and "waiting on you" in str(c[1].get("text", ""))
+    )
+    assert "waiting on you" in waiting_send[1]["text"]
 
-    door.map.messages["3"] = {"session": "shop", "time": "8:41 pm", "wall": time.time()}
+    markup_send = next(c for c in sends if c[1].get("reply_markup"))
+    message_id = api.calls.index(markup_send) + 1
+    door.map.messages[str(message_id)] = {"session": "shop", "time": "8:41 pm", "wall": time.time()}
     await door._callback({
         "id": "cq",
-        "data": sends[0][1]["reply_markup"]["inline_keyboard"][1][0]["callback_data"],
+        "data": markup_send[1]["reply_markup"]["inline_keyboard"][1][0]["callback_data"],
         "from": {"id": 42},
-        "message": {"message_id": 3, "chat": {"id": 42}},
+        "message": {"message_id": message_id, "chat": {"id": 42}},
     })
     cmd = await session.commands.get()
     assert "tapped option 2" in cmd["text"]
@@ -336,15 +344,15 @@ async def test_telegram_partial_quote_in_reply(
             "reply_to_message": {"message_id": 50, "text": full, "date": t0 - 660},
         },
     )
-    assert "replying to part of your message of 8:41 pm" in body
+    assert "quoting a message in the chat" in body
     assert "> Second sentence with detail." in body
     assert "First sentence" not in body
     whole = door._build_body(
         "whole reply",
         {"date": t0, "reply_to_message": {"message_id": 51, "text": full, "date": t0 - 660}},
     )
-    assert "replying to your message of" in whole
-    assert "part of" not in whole
+    assert "quoting a message in the chat" in whole
+    assert "your message" not in whole
     assert "> First sentence. Second sentence with detail." in whole
 
 
@@ -425,8 +433,10 @@ async def test_telegram_failure_preserves_voice(monkeypatch, tmp_path, failure) 
             await api.call("editMessageReplyMarkup")
         monkeypatch.setattr(door, "on_answer", edit_hook)
     assert await bridge.answer(bridge.sessions["sid"], "Which one?\n1. alpha\n2. beta")
+    await bridge.drain_background()
     assert "alpha" in spoken[-1]
     assert await bridge.waiting(bridge.sessions["sid"], "approve")
+    await bridge.drain_background()
     assert "approve" in spoken[-1]
 
 
@@ -512,6 +522,7 @@ async def test_update_reaches_telegram(monkeypatch, tmp_path) -> None:
     door, bridge, api = _door(monkeypatch, tmp_path)
     await _link(bridge)
     await bridge.update(bridge.sessions["sid"], "milestone", "Build is green.", None, False)
+    await bridge.drain_background()
     msg = next(c for c in api.calls if c[0] == "sendMessage")
     assert msg[1]["text"] == "<b>shop</b>: Build is green."
     assert any(c[0] == "sendVoice" for c in api.calls)
@@ -525,6 +536,7 @@ async def test_update_needs_you_buttons(monkeypatch, tmp_path) -> None:
         bridge.sessions["sid"], "needs-you", "Which path?",
         ["Left", "Right"], False,
     )
+    await bridge.drain_background()
     msg = next(c for c in api.calls if c[0] == "sendMessage")
     assert msg[1].get("reply_markup")
     assert "1. Left" in msg[1]["text"]
@@ -637,6 +649,7 @@ async def test_voice_out_when_no_voice_page(monkeypatch, tmp_path) -> None:
     door, bridge, api = _door(monkeypatch, tmp_path)
     await _link(bridge)
     await bridge.answer(bridge.sessions["sid"], "spoken bit\n---\nrules hidden")
+    await bridge.drain_background()
     voices = [c for c in api.calls if c[0] == "sendVoice"]
     assert len(voices) == 1
     assert voices[0][1]["caption"] == "shop"
@@ -667,6 +680,7 @@ async def test_dnd_queues_and_catchup(monkeypatch, tmp_path) -> None:
     session = bridge.sessions["sid"]
     await bridge.waiting(session, "approve")
     await bridge.answer(session, "Done now")
+    await bridge.drain_background()
     assert not any("waiting on you" in str(c[1].get("text", "")) for c in api.calls)
     await door._dispatch(_msg("dnd off", mid=2))
     summary = next(c for c in api.calls if "While you were away" in str(c[1].get("text", "")))
@@ -747,7 +761,7 @@ def test_html_split_balanced() -> None:
     chunks = telegram.split_outbound(telegram.markdown_html(source))
     assert len(chunks) > 3
     for chunk in chunks:
-        assert len(chunk) <= 4000
+        assert telegram.utf16_len(chunk) <= telegram.SEND_LIMIT
         parser = Balanced()
         parser.feed(chunk)
         parser.close()
@@ -770,9 +784,11 @@ async def test_html_rejection_plain_retry(monkeypatch, tmp_path) -> None:
         return await original(method, **params)
 
     monkeypatch.setattr(api, 'call', reject)
-    assert await door._send('<b>name</b>: &lt;hi&gt;')
+    markup = {"inline_keyboard": [[{"text": "1", "callback_data": "opt:x:1"}]]}
+    assert await door._send('<b>name</b>: &lt;hi&gt;', reply_markup=markup)
     assert attempts[1]['text'] == 'name: <hi>'
     assert 'parse_mode' not in attempts[1]
+    assert attempts[1]['reply_markup'] == markup
 
 
 async def test_dnd_preserves_spoken_source_and_options(monkeypatch, tmp_path) -> None:
@@ -947,3 +963,745 @@ async def test_multipart_voice_response_is_mapped(monkeypatch, tmp_path) -> None
         "session": "shop", "excerpt": "Spoken.",
         "wall": 1_700_000_000.0, "time": telegram.clock(1_700_000_000.0),
     }
+
+
+async def test_send_message_429_retries_all_chunks(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    send_attempts = 0
+    sleeps: list[float] = []
+    original = api.call
+
+    async def flaky(method, **params):
+        nonlocal send_attempts
+        if method == "sendMessage":
+            send_attempts += 1
+            if send_attempts == 2:
+                response = httpx.Response(
+                    429,
+                    json={"description": "Too Many Requests", "parameters": {"retry_after": 5}},
+                    request=httpx.Request("POST", "https://example.invalid"),
+                )
+                raise httpx.HTTPStatusError("429", request=response.request, response=response)
+        return await original(method, **params)
+
+    async def track_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(api, "call", flaky)
+    monkeypatch.setattr(asyncio, "sleep", track_sleep)
+    parts = [("part " + str(i) + " ") * 700 for i in range(5)]
+    padded = "\n\n".join(parts) + "\n\nPick?\n1. a\n2. b\n"
+    await door._deliver_answer(bridge.sessions["sid"], padded, spoken_source=padded)
+    chunks = [c for c in api.calls if c[0] == "sendMessage"]
+    assert len(chunks) >= 4
+    assert send_attempts >= 4
+    assert 5 in sleeps
+    assert not door.map.dnd_queue
+
+
+async def test_send_failure_queues_dnd_say_still_runs(monkeypatch, tmp_path) -> None:
+    import httpx
+    from loguru import logger
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    spoken: list[str] = []
+    log: list[str] = []
+    handler_id = logger.add(lambda m: log.append(m.record["message"]))
+
+    async def say(text, **kwargs):
+        spoken.append(text)
+        return True
+
+    original = api.call
+
+    async def fail_twice(method, **params):
+        if method == "sendMessage":
+            response = httpx.Response(
+                503,
+                text="unavailable",
+                request=httpx.Request("POST", "https://example.invalid"),
+            )
+            raise httpx.HTTPStatusError("503", request=response.request, response=response)
+        return await original(method, **params)
+
+    monkeypatch.setattr(bridge, "say", say)
+    monkeypatch.setattr(api, "call", fail_twice)
+    try:
+        await bridge.answer(bridge.sessions["sid"], "Hello there")
+        await bridge.drain_background()
+    finally:
+        logger.remove(handler_id)
+    assert spoken
+    queued = door.map.dnd_queue
+    assert len(queued) == 1 and queued[0].get("failed") is True
+    assert any("send failed (503" in line and "shop" in line for line in log)
+
+
+async def test_answer_say_before_tts_finishes(monkeypatch, tmp_path) -> None:
+    class SlowOpenAI(FakeOpenAI):
+        async def speech(self, text, *, model, voice, instructions, key):
+            await asyncio.sleep(0.3)
+            return await super().speech(
+                text, model=model, voice=voice, instructions=instructions, key=key,
+            )
+
+    door, bridge, api = _door(monkeypatch, tmp_path, openai=SlowOpenAI())
+    await _link(bridge)
+    t0 = time.monotonic()
+    await bridge.answer(bridge.sessions["sid"], "Short answer")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.2
+    await bridge.drain_background()
+
+
+async def test_reply_to_mapped_beats_mention(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge, "shop", "s1")
+    await _link(bridge, "office", "s2")
+    door.map.remember_message(
+        9, session="shop", text="in office, run the tests", wall=time.time(),
+    )
+    reply = {"message_id": 9, "text": "in office, run the tests", "date": time.time()}
+    await door._dispatch(_msg("in office, run the tests", reply_to=reply))
+    assert bridge.sessions["s2"].commands.empty()
+    cmd = await bridge.sessions["s1"].commands.get()
+    assert "in office, run the tests" in cmd["text"]
+
+
+async def test_reply_unlinked_blocks_mention_route(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge, "shop", "s1")
+    await _link(bridge, "office", "s2")
+    door.map.remember_message(9, session="shop", text="prior", wall=time.time())
+    bridge.sessions.unlink("s1")
+    reply = {"message_id": 9, "text": "prior", "date": time.time()}
+    await door._dispatch(_msg("office please run tests", reply_to=reply))
+    assert bridge.sessions["s2"].commands.empty()
+    assert any(
+        "shop" in str(c[1].get("text", "")) and "not linked" in str(c[1].get("text", "")).lower()
+        for c in api.calls
+    )
+
+
+def test_forwarded_message_body(tmp_path: Path) -> None:
+    message = {
+        "date": 1_700_000_000.0,
+        "text": "please review",
+        "forward_origin": {
+            "type": "user",
+            "sender_user": {"first_name": "Ann", "last_name": "Lee", "id": 999},
+        },
+    }
+    door = telegram.Door(Bridge(interval=0), map=telegram.MapStore(tmp_path / "map.json"))
+    body = door._build_body("", message)
+    assert body.startswith("Shahab forwarded, by Telegram")
+    assert "from Ann Lee:" in body
+    assert "> please review" in body
+    assert "please review" not in body.split(">", 1)[0]
+
+
+def test_foreign_reply_quoting_prefix(monkeypatch, tmp_path) -> None:
+    door, bridge, _ = _door(monkeypatch, tmp_path)
+    body = door._build_body(
+        "my follow-up",
+        {
+            "date": time.time(),
+            "reply_to_message": {"message_id": 404, "text": "foreign", "date": time.time()},
+        },
+    )
+    assert "quoting a message in the chat" in body
+    assert "your message" not in body
+
+
+def test_split_outbound_utf16_emoji_limit() -> None:
+    emoji = "\U0001f600"
+    text = emoji.join(["a" * 500] * 9)
+    chunks = telegram.split_outbound(telegram.markdown_html(text))
+    assert len(chunks) >= 2
+    assert all(telegram.utf16_len(chunk) <= telegram.SEND_LIMIT for chunk in chunks)
+
+
+async def test_dnd_flush_stops_on_second_failure(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    wall = time.time()
+    door.map.dnd_queue = [
+        {"kind": "answer", "session": "shop", "text": "answer-one", "wall": wall, "time": "t"},
+        {"kind": "answer", "session": "shop", "text": "answer-two", "wall": wall, "time": "t"},
+        {"kind": "answer", "session": "shop", "text": "answer-three", "wall": wall, "time": "t"},
+    ]
+    door.map.save()
+    deliveries = 0
+    original = api.call
+
+    async def fail_second_answer(method, **params):
+        nonlocal deliveries
+        text = str(params.get("text", ""))
+        if method == "sendMessage" and text.startswith("<b>shop</b>\n") and "answer-" in text:
+            deliveries += 1
+            if deliveries >= 2:
+                response = httpx.Response(
+                    500,
+                    text="nope",
+                    request=httpx.Request("POST", "https://example.invalid"),
+                )
+                raise httpx.HTTPStatusError("500", request=response.request, response=response)
+        return await original(method, **params)
+
+    monkeypatch.setattr(api, "call", fail_second_answer)
+    await door._flush_dnd()
+    assert len(door.map.dnd_queue) == 2
+    assert any("2 items are still queued" in str(c[1].get("text", "")) for c in api.calls)
+
+
+async def test_dnd_flush_delivers_unlinked_session_answer(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    door.map.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "Full queued answer body",
+        "wall": time.time(),
+        "time": "now",
+    }]
+    door.map.save()
+    bridge.sessions.unlink("sid")
+    await door._flush_dnd()
+    assert any(
+        "Full queued answer body" in str(c[1].get("text", ""))
+        for c in api.calls if c[0] == "sendMessage"
+    )
+    assert not door.map.dnd_queue
+
+
+async def test_answer_failure_queues_remainder_chunks_only(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    marker1 = "MARK_ONE_" + ("a" * 3980)
+    marker2 = "MARK_TWO_" + ("b" * 3200)
+    marker3 = "MARK_THR_" + ("c" * 3200)
+    body = f"{marker1}\n\n{marker2}\n\n{marker3}"
+    chunks = telegram.split_outbound(
+        telegram.markdown_html(body),
+        limit=telegram.SEND_LIMIT - telegram.utf16_len("<b>shop</b>") - 1,
+    )
+    assert len(chunks) >= 3
+
+    delivered = 0
+    original = api.call
+
+    async def fail_after_first_chunk(method, **params):
+        nonlocal delivered
+        if method == "sendMessage":
+            if delivered >= 1:
+                response = httpx.Response(
+                    503,
+                    text="unavailable",
+                    request=httpx.Request("POST", "https://example.invalid"),
+                )
+                raise httpx.HTTPStatusError("503", request=response.request, response=response)
+            delivered += 1
+        return await original(method, **params)
+
+    monkeypatch.setattr(api, "call", fail_after_first_chunk)
+    await door._deliver_answer(bridge.sessions["sid"], body, spoken_source=body)
+    assert len(door.map.dnd_queue) == 1
+    queued = door.map.dnd_queue[0]
+    assert queued.get("outbound_chunks")
+    first_send = next(c for c in api.calls if c[0] == "sendMessage")
+    assert "MARK_ONE_" in str(first_send[1].get("text", ""))
+    assert "MARK_TWO_" not in str(first_send[1].get("text", ""))
+    assert sum(1 for c in api.calls if c[0] == "sendMessage") == 1
+
+    monkeypatch.setattr(api, "call", original)
+    door.map.dnd = False
+    send_baseline = sum(1 for c in api.calls if c[0] == "sendMessage")
+    await door._flush_dnd()
+    retry = [
+        str(c[1].get("text", ""))
+        for c in api.calls[send_baseline:]
+        if c[0] == "sendMessage"
+        and "While you were away" not in str(c[1].get("text", ""))
+    ]
+    assert not any("MARK_ONE_" in t for t in retry)
+    assert any("MARK_TWO_" in t for t in retry)
+    assert any("MARK_THR_" in t for t in retry)
+    assert not door.map.dnd_queue
+
+
+async def test_answer_failure_no_duplicate_keyboard(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    prefix = "intro " * 550
+    body = f"{prefix}\nPick?\n1. alpha\n2. beta\n\nmore " + ("detail " * 500)
+    delivered = 0
+    original = api.call
+
+    async def fail_after_first_chunk(method, **params):
+        nonlocal delivered
+        if method == "sendMessage":
+            if delivered >= 1:
+                response = httpx.Response(
+                    503,
+                    text="unavailable",
+                    request=httpx.Request("POST", "https://example.invalid"),
+                )
+                raise httpx.HTTPStatusError("503", request=response.request, response=response)
+            delivered += 1
+        return await original(method, **params)
+
+    monkeypatch.setattr(api, "call", fail_after_first_chunk)
+    await door._deliver_answer(bridge.sessions["sid"], body, spoken_source=body)
+    assert len(door.map.pending) == 1
+    assert door.map.dnd_queue[0].get("no_keyboard") is True
+
+    monkeypatch.setattr(api, "call", original)
+    door.map.dnd = False
+    pending_ids = set(door.map.pending)
+    await door._flush_dnd()
+    assert set(door.map.pending) == pending_ids
+    keyed = [
+        c for c in api.calls
+        if c[0] == "sendMessage" and c[1].get("reply_markup")
+    ]
+    assert len(keyed) == 1
+
+
+async def test_options_keyboard_on_option_chunk(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    prefix = "intro " * 550
+    body = f"{prefix}\nPick?\n1. alpha\n2. beta\n\nmore " + ("detail " * 500)
+    await door._deliver_answer(
+        bridge.sessions["sid"], body, spoken_source=body,
+    )
+    sends = [c for c in api.calls if c[0] == "sendMessage"]
+    assert len(sends) >= 2
+    assert sends[0][1].get("reply_markup")
+    assert not sends[-1][1].get("reply_markup")
+
+
+async def test_rapid_answers_keep_first_keyboard(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    await door.on_answer(session, "Which path?\n1. left\n2. right\n")
+    first = next(c for c in api.calls if c[0] == "sendMessage")
+    assert first[1].get("reply_markup")
+    await door.on_answer(session, "Follow-up answer without options.")
+    edits = [c for c in api.calls if c[0] == "editMessageReplyMarkup"]
+    assert not edits
+    assert first[1].get("reply_markup")
+
+
+def test_detect_options_divider_variants() -> None:
+    from voice_relay.feed import detect_options
+
+    assert detect_options("Pick?\n1. a\n2. b\n----\nhidden") == ["1", "2"]
+    assert detect_options("Pick?\n1. a\n2. b\n---   \nhidden") == ["1", "2"]
+
+
+async def test_dnd_retry_reschedules_after_each_failure(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    wall = time.time()
+    door.map.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "retry-me",
+        "wall": wall,
+        "time": "t",
+    }]
+    door.map.save()
+    flushes = 0
+    real_flush = door._flush_dnd
+
+    async def counting_flush() -> None:
+        nonlocal flushes
+        flushes += 1
+        await real_flush()
+
+    async def fail_deliver(*_args, **_kwargs) -> bool:
+        return False
+
+    real_sleep = asyncio.sleep
+
+    async def instant_retry_sleep(delay: float) -> None:
+        if delay <= 0:
+            await real_sleep(delay)
+            return
+
+    monkeypatch.setattr(door, "_flush_dnd", counting_flush)
+    monkeypatch.setattr(door, "_deliver_answer", fail_deliver)
+    monkeypatch.setattr(asyncio, "sleep", instant_retry_sleep)
+    door._schedule_dnd_retry()
+    for _ in range(3):
+        task = door._dnd_retry_task
+        assert task is not None
+        await task
+        for _ in range(5):
+            if door._dnd_retry_task is not None:
+                break
+            await real_sleep(0)
+        assert door._dnd_retry_task is not None and not door._dnd_retry_task.done()
+    assert flushes == 3
+
+
+def _answer_chunk_markers(api: FakeAPI) -> list[str]:
+    markers: list[str] = []
+    for method, params in api.calls:
+        if method != "sendMessage":
+            continue
+        text = str(params.get("text", ""))
+        if not text.startswith("<b>shop</b>\n"):
+            continue
+        markers.append(text.split("\n", 1)[1])
+    return markers
+
+
+async def test_dnd_flush_partial_failure_exactly_once(monkeypatch, tmp_path) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    wall = time.time()
+    door.map.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "queued",
+        "wall": wall,
+        "time": "t",
+        "outbound_chunks": ["FIRST", "SECOND"],
+    }]
+    door.map.save()
+    original = api.call
+
+    async def fail_on_second(method, **params):
+        text = str(params.get("text", ""))
+        if method == "sendMessage" and "SECOND" in text and "<b>shop</b>\n" in text:
+            response = httpx.Response(
+                500,
+                text="nope",
+                request=httpx.Request("POST", "https://example.invalid"),
+            )
+            raise httpx.HTTPStatusError("500", request=response.request, response=response)
+        return await original(method, **params)
+
+    monkeypatch.setattr(api, "call", fail_on_second)
+    await door._flush_dnd()
+    assert door.map.dnd_queue
+    assert door.map.dnd_queue[0]["outbound_chunks"] == ["SECOND"]
+
+    monkeypatch.setattr(api, "call", original)
+    await door._flush_dnd()
+    assert _answer_chunk_markers(api) == ["FIRST", "SECOND"]
+    assert not door.map.dnd_queue
+
+
+async def test_dnd_flush_concurrent_no_duplicate(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    wall = time.time()
+    door.map.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "queued",
+        "wall": wall,
+        "time": "t",
+        "outbound_chunks": ["ONLY"],
+    }]
+    door.map.save()
+    gate = asyncio.Event()
+    original_send = door._send
+
+    async def yielding_send(text, **kwargs):
+        if "ONLY" in text:
+            gate.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        return await original_send(text, **kwargs)
+
+    monkeypatch.setattr(door, "_send", yielding_send)
+
+    async def wait_then_flush() -> None:
+        await gate.wait()
+        await door._flush_dnd()
+
+    await asyncio.gather(door._flush_dnd(), wait_then_flush())
+    assert _answer_chunk_markers(api) == ["ONLY"]
+    assert not door.map.dnd_queue
+
+
+async def test_dnd_retry_respects_dnd_at_fire_time(monkeypatch, tmp_path) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    door.map.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "held",
+        "wall": time.time(),
+        "time": "t",
+    }]
+    door.map.save()
+    baseline = len(api.calls)
+
+    async def instant_retry_sleep(delay: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", instant_retry_sleep)
+    door._schedule_dnd_retry()
+    door.map.dnd = True
+    door.map.save()
+    task = door._dnd_retry_task
+    assert task is not None
+    await task
+    new_sends = [c for c in api.calls[baseline:] if c[0] == "sendMessage"]
+    assert not new_sends
+    assert len(door.map.dnd_queue) == 1
+    assert door.map.dnd_queue[0]["text"] == "held"
+
+
+def test_forwarded_voice_note_uses_transcript(tmp_path: Path) -> None:
+    message = {
+        "date": 1_700_000_000.0,
+        "voice": {"file_id": "v1", "duration": 1},
+        "forward_origin": {
+            "type": "user",
+            "sender_user": {"first_name": "Ann", "last_name": "Lee", "id": 999},
+        },
+    }
+    door = telegram.Door(Bridge(interval=0), map=telegram.MapStore(tmp_path / "map.json"))
+    body = door._build_body("hello tail", message)
+    assert "> hello tail" in body
+    assert "from Ann Lee:" in body
+
+
+def test_forwarded_message_preserves_long_text(tmp_path: Path) -> None:
+    tail = "TAILMARKER_900"
+    forward_text = "x" * 850 + tail
+    message = {
+        "date": 1_700_000_000.0,
+        "text": forward_text,
+        "forward_origin": {
+            "type": "user",
+            "sender_user": {"first_name": "Ann", "last_name": "Lee", "id": 999},
+        },
+    }
+    door = telegram.Door(Bridge(interval=0), map=telegram.MapStore(tmp_path / "map.json"))
+    body = door._build_body("", message)
+    assert tail in body
+
+
+def test_redact_transport_error_masks_bot_token() -> None:
+    secret = "123456789:AAH-synthetic-secret-token"
+    raw = f"Error for https://api.telegram.org/bot{secret}/sendMessage: forbidden"
+    redacted = telegram._redact_transport_error(raw)
+    assert secret not in redacted
+    assert "bot<redacted>" in redacted
+
+
+def _answer_body_markers(api: FakeAPI) -> list[str]:
+    markers: list[str] = []
+    for method, params in api.calls:
+        if method != "sendMessage":
+            continue
+        text = str(params.get("text", ""))
+        if not text.startswith("<b>shop</b>\n"):
+            continue
+        body = text.split("\n", 1)[1]
+        for tag in ("FIRST", "SECOND"):
+            if tag in body:
+                markers.append(tag)
+                break
+    return markers
+
+
+async def test_telegram_deliveries_stay_ordered_with_slow_first(
+    monkeypatch, tmp_path,
+) -> None:
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    door._ensure_outbox_worker()
+    session = bridge.sessions["sid"]
+
+    async def instant_say(text, **kwargs):
+        return True
+
+    monkeypatch.setattr(bridge, "say", instant_say)
+
+    original_send = door._send
+    sending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_first(text, **kwargs):
+        if "FIRST" in text:
+            sending.set()
+            await release.wait()
+        return await original_send(text, **kwargs)
+
+    monkeypatch.setattr(door, "_send", slow_first)
+
+    await asyncio.gather(
+        bridge.answer(session, "FIRST"),
+        bridge.answer(session, "SECOND"),
+    )
+    await asyncio.wait_for(sending.wait(), timeout=1)
+    assert _answer_body_markers(api) == []
+    release.set()
+    await bridge.drain_background()
+    assert _answer_body_markers(api) == ["FIRST", "SECOND"]
+    await door.stop()
+
+
+async def test_telegram_failure_queues_later_answer_behind_retry(
+    monkeypatch, tmp_path,
+) -> None:
+    import httpx
+
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    door._ensure_outbox_worker()
+    session = bridge.sessions["sid"]
+
+    async def instant_say(text, **kwargs):
+        return True
+
+    monkeypatch.setattr(bridge, "say", instant_say)
+    original = api.call
+
+    async def fail_first(method, **params):
+        text = str(params.get("text", ""))
+        if method == "sendMessage" and "FIRST" in text and "<b>shop</b>\n" in text:
+            response = httpx.Response(
+                503,
+                text="nope",
+                request=httpx.Request("POST", "https://example.invalid"),
+            )
+            raise httpx.HTTPStatusError("503", request=response.request, response=response)
+        return await original(method, **params)
+
+    monkeypatch.setattr(api, "call", fail_first)
+    await asyncio.gather(
+        bridge.answer(session, "FIRST"),
+        bridge.answer(session, "SECOND"),
+    )
+    await bridge.drain_background()
+    assert len(door.map.dnd_queue) == 2
+    assert "SECOND" in door.map.dnd_queue[1]["text"]
+
+    monkeypatch.setattr(api, "call", original)
+    await door._flush_dnd()
+    assert _answer_body_markers(api) == ["FIRST", "SECOND"]
+    assert not door.map.dnd_queue
+
+
+async def test_telegram_start_schedules_persisted_failed_delivery(
+    monkeypatch, tmp_path,
+) -> None:
+    map_path = tmp_path / "telegram-map.json"
+    wall = time.time()
+    telegram.MapStore(map_path).save()
+    store = telegram.MapStore.load(map_path)
+    store.dnd_queue = [{
+        "kind": "answer",
+        "session": "shop",
+        "text": "persisted",
+        "wall": wall,
+        "time": "t",
+        "failed": True,
+    }]
+    store.save()
+
+    door, _bridge, api = _door(monkeypatch, tmp_path)
+    api._blocked.set()
+
+    async def instant_retry_sleep(delay: float) -> None:
+        return
+
+    async def blocked_poll():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(door, "_poll_loop", blocked_poll)
+    monkeypatch.setattr(asyncio, "sleep", instant_retry_sleep)
+    await door.start()
+    assert door._dnd_retry_task is not None
+    task = door._dnd_retry_task
+    await task
+    texts = [
+        str(params.get("text", ""))
+        for method, params in api.calls
+        if method == "sendMessage" and "persisted" in str(params.get("text", ""))
+    ]
+    assert texts
+    assert not door.map.dnd_queue
+    await door.stop()
+
+
+async def test_send_failure_log_redacts_token(monkeypatch, tmp_path) -> None:
+    import httpx
+    from loguru import logger
+
+    secret = "123456789:AAH-synthetic-secret"
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    log: list[str] = []
+    handler_id = logger.add(lambda m: log.append(m.record["message"]))
+    original = api.call
+
+    async def fail(method, **params):
+        if method == "sendMessage":
+            msg = f"POST https://api.telegram.org/bot{secret}/sendMessage failed"
+            response = httpx.Response(
+                503,
+                text=msg,
+                request=httpx.Request("POST", "https://example.invalid"),
+            )
+            raise httpx.HTTPStatusError("503", request=response.request, response=response)
+        return await original(method, **params)
+
+    try:
+        monkeypatch.setattr(api, "call", fail)
+        await door._send("hello", session="shop")
+    finally:
+        logger.remove(handler_id)
+    joined = "\n".join(log)
+    assert secret not in joined
+    assert "bot<redacted>" in joined
+
+
+async def test_retry_preserves_arrival_order_across_delivery_kinds(monkeypatch, tmp_path):
+    door, bridge, api = _door(monkeypatch, tmp_path)
+    await _link(bridge)
+    session = bridge.sessions["sid"]
+    original = door._send
+
+    async def fail_send(text, **kwargs):
+        return None
+
+    monkeypatch.setattr(door, "_send", fail_send)
+    await door.on_answer(session, "FIRST")
+    await door.on_update(session, "progress", "SECOND", None)
+    await door.on_waiting(session, "THIRD")
+    assert [item["kind"] for item in door.map.dnd_queue] == ["answer", "update", "waiting"]
+    monkeypatch.setattr(door, "_send", original)
+    await door._flush_dnd()
+    texts = [
+        params["text"] for method, params in api.calls
+        if method == "sendMessage" and not params["text"].startswith("While you were away:")
+    ]
+    assert len(texts) == 3
+    assert all(
+        marker in text for marker, text in zip(("FIRST", "SECOND", "THIRD"), texts, strict=True)
+    )
+    assert not door.map.dnd_queue
+    await door.stop()

@@ -33,10 +33,18 @@ def spoken_part(text: str) -> str:
     return text[:SPOKEN_MAX]
 
 
+def _spoken_option_lines(text: str) -> list[str]:
+    lines = text.replace("\r\n", "\n").splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "---" or re.fullmatch(r"-{3,}", stripped) or re.fullmatch(r"\*{3,}", stripped):
+            return lines[:index]
+    return lines[-15:]
+
+
 def detect_options(text: str) -> list[str]:
     """Numbered 2-4 options directly after a line ending in \"?\", in the spoken part."""
-    lines = text.replace("\r\n", "\n").splitlines()
-    lines = lines[: lines.index("---")] if "---" in lines else lines[-15:]
+    lines = _spoken_option_lines(text)
     for index, line in enumerate(lines):
         if not OPTION_PATTERN.match(line.strip()):
             continue

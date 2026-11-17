@@ -216,11 +216,37 @@ class Bridge:
         self._quiet = asyncio.Event()
         self._quiet.set()
         self._notices: set[asyncio.Task[bool]] = set()
+        self._background: set[asyncio.Task[None]] = set()
         self._telegram: Any = None
         self.feed = Feed()
         self._answering: set[int] = set()
         self._aimed_reply_to: int | None = None
         self._aimed_quote: str | None = None
+
+    def _telegram_background(self, coro: Any, log_fmt: str) -> None:
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+
+        def done(done_task: asyncio.Task[None]) -> None:
+            self._background.discard(done_task)
+            if done_task.cancelled():
+                return
+            error = done_task.exception()
+            if error is not None:
+                logger.warning(log_fmt, type(error).__name__)
+
+        task.add_done_callback(done)
+
+    async def drain_background(self) -> None:
+        pending = list(self._background)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._background.clear()
+
+    def cancel_background(self) -> None:
+        for task in self._background:
+            task.cancel()
+        self._background.clear()
 
     def held(self) -> bool:
         if self._hold_until is None:
@@ -623,10 +649,10 @@ class Bridge:
                 self._speaker = asyncio.create_task(self._speak_updates())
         self.feed.record_update(session, text, options, wall=item.wall)
         if self._telegram is not None:
-            try:
-                await self._telegram.on_update(session, kind, text, options)
-            except Exception as error:
-                logger.warning("telegram: update hook failed: {}", type(error).__name__)
+            self._telegram_background(
+                self._telegram.on_update(session, kind, text, options),
+                "telegram: update hook failed: {}",
+            )
         return outcome
 
     def _remember_update(self, item: Update) -> None:
@@ -681,10 +707,10 @@ class Bridge:
         ]
         self.feed.record_answer(session, text)
         if self._telegram is not None:
-            try:
-                await self._telegram.on_answer(session, text)
-            except Exception as error:
-                logger.warning("telegram: answer hook failed: {}", type(error).__name__)
+            self._telegram_background(
+                self._telegram.on_answer(session, text),
+                "telegram: answer hook failed: {}",
+            )
         spoken, detail = split_answer(text)
         content = (
             ANSWER_SPLIT.format(name=session.name, spoken=spoken, detail=detail)
@@ -704,10 +730,10 @@ class Bridge:
         session.asked_at = None
         self.feed.record_waiting(session, action)
         if self._telegram is not None:
-            try:
-                await self._telegram.on_waiting(session, action)
-            except Exception as error:
-                logger.warning("telegram: waiting hook failed: {}", type(error).__name__)
+            self._telegram_background(
+                self._telegram.on_waiting(session, action),
+                "telegram: waiting hook failed: {}",
+            )
         if self.held():
             self._remember("waiting", session.name, action)
             return False
